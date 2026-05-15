@@ -1,0 +1,90 @@
+{
+  "name": "@avant-garde/mastra-self-learning",
+  "version": "0.0.1",
+  "description": "Self-learning extension for Mastra — closed learning loops, autonomous skill extraction, and layered memory inspired by Hermes Agent",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs",
+      "types": "./dist/index.d.ts"
+    },
+    "./processors": {
+      "import": "./dist/processors/index.js",
+      "types": "./dist/processors/index.d.ts"
+    },
+    "./skills": {
+      "import": "./dist/skills/index.js",
+      "types": "./dist/skills/index.d.ts"
+    },
+    "./memory": {
+      "import": "./dist/memory/index.js",
+      "types": "./dist/memory/index.d.ts"
+    },
+    "./harness": {
+      "import": "./dist/harness/index.js",
+      "types": "./dist/harness/index.d.ts"
+    },
+    "./tools": {
+      "import": "./dist/tools/index.js",
+      "types": "./dist/tools/index.d.ts"
+    },
+    "./workflows": {
+      "import": "./dist/workflows/index.js",
+      "types": "./dist/workflows/index.d.ts"
+    },
+    "./evals": {
+      "import": "./dist/evals/index.js",
+      "types": "./dist/evals/index.d.ts"
+    }
+  },
+  "files": ["dist", "README.md", "LICENSE"],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "lint": "tsc --noEmit",
+    "clean": "rm -rf dist .turbo"
+  },
+  "peerDependencies": {
+    "@mastra/core": "^1.25.0",
+    "@mastra/memory": "^1.25.0"
+  },
+  "peerDependenciesMeta": {
+    "@mastra/memory": {
+      "optional": true
+    }
+  },
+  "dependencies": {
+    "gray-matter": "^4.0.3",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@mastra/core": "^1.31.0",
+    "@mastra/memory": "^1.31.0",
+    "@mastra/pg": "^1.31.0",
+    "tsup": "^8.4.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  },
+  "keywords": [
+    "mastra", "ai-agent", "self-learning", "hermes",
+    "skills", "agentskills", "memory", "learning-loop",
+    "processors", "harness", "avant-garde"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/avant-garde-labs/mastra-self-learning.git",
+    "directory": "packages/core"
+  },
+  "homepage": "https://github.com/avant-garde-labs/mastra-self-learning#readme",
+  "bugs": {
+    "url": "https://github.com/avant-garde-labs/mastra-self-learning/issues"
+  }
+}

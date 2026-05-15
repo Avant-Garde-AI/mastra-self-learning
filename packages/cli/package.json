@@ -1,0 +1,26 @@
+{
+  "name": "@avant-garde/mastra-self-learning-cli",
+  "version": "0.0.1",
+  "description": "CLI for managing self-learning skills — import, export, list, analytics",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "mastra-sl": "./dist/index.js"
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@avant-garde/mastra-self-learning": "workspace:*",
+    "commander": "^13.0.0",
+    "chalk": "^5.4.0"
+  },
+  "devDependencies": {
+    "tsup": "^8.4.0",
+    "typescript": "^5.7.0"
+  }
+}

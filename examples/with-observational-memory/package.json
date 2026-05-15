@@ -1,0 +1,17 @@
+{
+  "name": "example-with-observational-memory",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx src/mastra/agents/index.ts"
+  },
+  "dependencies": {
+    "@mastra/core": "^1.31.0",
+    "@mastra/memory": "^1.31.0",
+    "@mastra/pg": "^1.31.0",
+    "@avant-garde/mastra-self-learning": "workspace:*"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.0"
+  }
+}
