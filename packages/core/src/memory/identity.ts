@@ -3,54 +3,74 @@ import type { Identity, IdentityLayerConfig } from '../config.js';
 /**
  * Identity layer that prevents tone drift over long agent usage.
  *
- * Stores the agent's personality, expertise, formatting preferences,
- * and guardrails. Seeded by the developer at creation time, refined
- * by the agent as it learns the user's preferences, and protected
- * from drift by periodic comparison against seed values.
+ * MVP scope: static identity rendering only. The identity passed at
+ * construction time is what gets rendered, every request. Drift detection and
+ * calibration storage are deferred (they throw with a Phase-6 marker).
  *
- * @see docs/05-memory-layers.md
+ * @see docs/mvp/04-phase-context-injection.md
  */
 export class IdentityLayer {
   constructor(
-    private storage: unknown, // MastraStorage
+    private storage: unknown,
     private config: IdentityLayerConfig,
     private seedIdentity: Identity,
   ) {}
 
-  /** Get the current identity (may differ from seed due to calibration) */
-  async getCurrentIdentity(agentId: string): Promise<Identity> {
-    throw new Error('Not implemented — Phase 3');
+  /**
+   * The current identity. In the MVP this is always the seed — calibration
+   * storage lands in Phase 6.
+   */
+  async getCurrentIdentity(_agentId?: string): Promise<Identity> {
+    return this.seedIdentity;
   }
 
-  /** Update the identity based on learned user preferences */
-  async updateCalibration(agentId: string, updates: Partial<Identity>): Promise<void> {
-    throw new Error('Not implemented — Phase 3');
+  async updateCalibration(_agentId: string, _updates: Partial<Identity>): Promise<void> {
+    throw new Error(
+      'IdentityLayer.updateCalibration is a Phase 6 feature (identity calibration storage).',
+    );
+  }
+
+  async measureDrift(_agentId: string): Promise<number> {
+    throw new Error(
+      'IdentityLayer.measureDrift is a Phase 6 feature (drift detection / embeddings).',
+    );
   }
 
   /**
-   * Measure drift between current identity and seed identity.
-   * Returns 0 (no drift) to 1 (complete divergence).
+   * Build the Identity block for system-prompt injection. Returns an empty
+   * string if the identity has no meaningful content so the caller can omit
+   * the section (and its separator) cleanly.
    */
-  async measureDrift(agentId: string): Promise<number> {
-    throw new Error('Not implemented — Phase 3');
-  }
-
-  /**
-   * Build the identity block for system prompt injection.
-   */
-  buildIdentityBlock(identity: Identity): string {
+  buildIdentityBlock(identity: Identity = this.seedIdentity): string {
     const parts: string[] = [];
 
-    parts.push(`## Identity\n\n${identity.personality}`);
+    const personality = identity.personality?.trim();
+    if (personality) {
+      parts.push(`## Identity\n\n${personality}`);
+    }
 
-    if (identity.expertise.length > 0) {
+    if (identity.expertise && identity.expertise.length > 0) {
       parts.push(`**Expertise:** ${identity.expertise.join(', ')}`);
     }
 
-    if (identity.guardrails.length > 0) {
-      parts.push(`**Guardrails:**\n${identity.guardrails.map((g) => `- ${g}`).join('\n')}`);
+    if (identity.formatting) {
+      const f = identity.formatting;
+      const bits: string[] = [];
+      if (f.defaultLength) bits.push(`${f.defaultLength} responses`);
+      if (f.codeStyle) bits.push(`${f.codeStyle} code`);
+      if (f.listPreference) bits.push(`${f.listPreference} lists`);
+      if (bits.length > 0) parts.push(`**Formatting:** ${bits.join(', ')}`);
     }
 
+    if (identity.guardrails && identity.guardrails.length > 0) {
+      parts.push(
+        `**Guardrails:**\n${identity.guardrails.map((g) => `- ${g}`).join('\n')}`,
+      );
+    }
+
+    // If only the header would render (no personality and nothing else),
+    // return empty so the section is skipped entirely.
+    if (parts.length === 0) return '';
     return parts.join('\n\n');
   }
 }

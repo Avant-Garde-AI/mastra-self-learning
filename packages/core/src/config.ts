@@ -29,9 +29,9 @@ export type ExtractionPolicy = z.infer<typeof ExtractionPolicySchema>;
 
 export const SkillRouterConfigSchema = z.object({
   /** Max tokens for the L0 skill index in system prompt */
-  indexBudget: z.number().int().min(100).default(3000),
+  indexBudget: z.number().int().min(1).default(3000),
   /** Max tokens for actively loaded skills per turn */
-  activeBudget: z.number().int().min(100).default(8000),
+  activeBudget: z.number().int().min(1).default(8000),
   /** Max simultaneously loaded L1 skills */
   maxActiveSkills: z.number().int().min(1).default(3),
   /** Whether to auto-inject L0 index into the system prompt */

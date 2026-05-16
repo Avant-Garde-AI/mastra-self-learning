@@ -4,10 +4,13 @@ import type { SkillStorageExtension } from './storage-extension.js';
 /**
  * Hybrid skill search combining full-text search and semantic similarity.
  *
- * - FTS: Matches skill names, descriptions, tags, and body text via the
- *   storage backend's native FTS (Postgres tsvector, LibSQL FTS5, etc.)
- * - Semantic: Embeds the query and compares against pre-computed skill
- *   embeddings via Mastra's vector infrastructure.
+ * - **FTS** (Phase 1): Postgres `tsvector` over name, description, instructions.
+ *   Implemented via {@link SkillStorageExtension.search}.
+ * - **Semantic** (Phase 4): pgvector cosine similarity against pre-computed
+ *   skill embeddings. Throws in v0.1.0.
+ *
+ * The MVP intentionally returns FTS results only. Semantic and hybrid modes
+ * are tracked in `risks-and-unknowns.md` (R3, R7) and gated to Phase 4.
  *
  * @see docs/03-skill-system.md for search details
  */
@@ -18,26 +21,16 @@ export class SkillSearch {
   ) {}
 
   async search(options: SkillSearchOptions): Promise<SkillSearchResult[]> {
-    const mode = options.mode ?? 'hybrid';
-
-    // TODO: Phase 1 (FTS), Phase 4 (semantic)
-    //
-    // if (mode === 'fts' || mode === 'hybrid') {
-    //   ftsResults = await this.ftsSearch(options);
-    // }
-    // if (mode === 'semantic' || mode === 'hybrid') {
-    //   semanticResults = await this.semanticSearch(options);
-    // }
-    // return mergeAndRank(ftsResults, semanticResults);
-
-    throw new Error('Not implemented — Phase 1');
-  }
-
-  private async ftsSearch(options: SkillSearchOptions): Promise<SkillSearchResult[]> {
-    throw new Error('Not implemented — Phase 1');
-  }
-
-  private async semanticSearch(options: SkillSearchOptions): Promise<SkillSearchResult[]> {
-    throw new Error('Not implemented — Phase 4');
+    const mode = options.mode ?? 'fts';
+    if (mode === 'fts') {
+      return this.storage.search({ ...options, mode: 'fts' });
+    }
+    if (mode === 'semantic' || mode === 'hybrid') {
+      throw new Error(
+        `SkillSearch mode "${mode}" is a Phase 4 feature. v0.1.0 supports FTS only. ` +
+          `embeddingModel=${this.embeddingModel ?? '(none)'}`,
+      );
+    }
+    throw new Error(`Unknown search mode: ${String(mode)}`);
   }
 }

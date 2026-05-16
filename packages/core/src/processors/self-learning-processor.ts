@@ -1,89 +1,283 @@
-import type { ExtractionPolicy } from '../config.js';
-import type { TaskTrajectory } from '../skills/extractor.js';
+import { ExtractionPolicySchema, type ExtractionPolicy } from '../config.js';
+import {
+  SkillExtractor,
+  type TaskTrajectory,
+} from '../skills/extractor.js';
+import {
+  SkillStorageExtension,
+  type MastraPostgresLike,
+} from '../skills/storage-extension.js';
+import { SkillSearch } from '../skills/search.js';
+import {
+  type AuxiliaryGenerate,
+} from '../skills/auxiliary-llm.js';
+import {
+  observeChunk,
+  readState,
+  buildTrajectory,
+} from './chunk-observer.js';
 
 /**
  * Options for the self-learning output processor.
+ *
+ * Implementation note: this factory accepts either an `agentId` (best-effort
+ * default) or pulls it from `processOutputResult.args.requestContext` at call
+ * time when available. The factory-time value is the fallback.
  */
 export interface SelfLearningProcessorOptions {
-  /** Mastra storage instance */
-  storage: unknown; // MastraStorage — typed once we import @mastra/core
-  /** Auxiliary model for extraction/refinement */
-  auxiliaryModel?: string;
-  /** Extraction policy configuration */
+  /** Mastra storage instance (a `PostgresStore`) or an already-constructed extension. */
+  storage: MastraPostgresLike | SkillStorageExtension;
+  /**
+   * Required when `extraction.useGeneralizabilityCheck` is true (the default)
+   * or when extraction would otherwise fire. The function is called for the
+   * generalizability gate, synthesis, and Phase-5 refinement.
+   *
+   * See {@link AuxiliaryGenerate} JSDoc for adapter examples.
+   */
+  generate?: AuxiliaryGenerate;
+  /** Extraction policy overrides. Defaults applied by `ExtractionPolicySchema.parse`. */
   extraction?: Partial<ExtractionPolicy>;
+  /** Owning agent ID. Used as the storage scope for extracted skills. */
+  agentId?: string | null;
+  /**
+   * Test-only: maximum time (ms) to wait for pending extractions during
+   * `_waitForPendingExtractions()`. Default 30 s.
+   */
+  pendingTimeoutMs?: number;
+}
+
+/**
+ * The Processor instance we return. Conforms to Mastra's `Processor<id>`
+ * shape but also carries a `_waitForPendingExtractions` helper for tests.
+ */
+export interface SelfLearningProcessor {
+  readonly id: 'self-learning';
+  readonly name: 'self-learning';
+  readonly description: string;
+  processOutputStream(args: ProcessOutputStreamArgsLike): unknown;
+  processOutputResult(args: ProcessOutputResultArgsLike): Promise<unknown>;
+  /**
+   * Test-only helper: resolves when all fire-and-forget extraction promises
+   * triggered by recent `processOutputResult` calls have settled.
+   */
+  _waitForPendingExtractions(): Promise<void>;
+  /** Direct access for tests / Phase 5. */
+  readonly extractor: SkillExtractor;
+}
+
+/**
+ * Structural subset of Mastra's `ProcessOutputStreamArgs` we depend on.
+ * Defined structurally to avoid a hard import-time dep on a specific Mastra
+ * processor type that may evolve. See `MASTRA_API_NOTES.md`.
+ */
+export interface ProcessOutputStreamArgsLike {
+  part: unknown;
+  state: Record<string, unknown>;
+}
+
+export interface ProcessOutputResultArgsLike {
+  /** Per-processor state (same `state` bag as `processOutputStream`). */
+  state: Record<string, unknown>;
+  /** `OutputResult` from Mastra: `text`, `usage`, `finishReason`, `steps[]`. */
+  result?: {
+    text?: string;
+    finishReason?: string;
+    steps?: Array<{
+      text?: string;
+      toolCalls?: Array<{ toolName?: string; toolCallId?: string; args?: unknown; input?: unknown }>;
+      toolResults?: Array<{ toolCallId?: string; result?: unknown; output?: unknown }>;
+    }>;
+  };
+  /** Final list of messages produced this request. */
+  messages?: Array<{ role?: string; content?: unknown }>;
+  /** `RequestContext` if Mastra wired one through; we treat it as a Map. */
+  requestContext?: { get?: (key: string) => unknown };
+  /** Tracing context (unused in MVP; future OTel work). */
+  tracingContext?: unknown;
 }
 
 /**
  * Create a Mastra output processor that implements the closed learning loop.
  *
- * This processor sits inside the agent's agentic loop via Mastra's
- * processOutputStep mechanism. It:
- *
- * 1. Accumulates state across steps via ProcessorState:
- *    - Counts tool calls
- *    - Records tool call trace (names, inputs, outputs)
- *    - Detects task completion signals
- *
- * 2. When the agent loop terminates (final response, no more tool calls):
- *    - Evaluates accumulated state against ExtractionPolicy
- *    - If triggered, fires async skill extraction via SkillExtractor
- *    - Records usage if an existing skill was used
- *
- * The processor is streaming-aware — it processes each chunk via
- * processOutputStream and accumulates state without blocking.
+ * After a turn finishes:
+ *   1. Build a `TaskTrajectory` from `result.steps[]` (preferred) or the
+ *      streaming `state` accumulated by `processOutputStream`.
+ *   2. Fire-and-forget extraction via `SkillExtractor.evaluate(trajectory)`.
+ *   3. Never throw or delay the user-visible response.
  *
  * @example
- * ```typescript
- * import { createSelfLearningProcessor } from '@avant-garde/mastra-self-learning/processors';
+ * ```ts
+ * const processor = createSelfLearningProcessor({
+ *   storage,
+ *   generate: myAuxLLM,
+ *   extraction: { minToolCalls: 5 },
+ * });
  *
  * const agent = new Agent({
- *   outputProcessors: [
- *     createSelfLearningProcessor({
- *       storage,
- *       extraction: { minToolCalls: 5 },
- *     }),
- *   ],
+ *   model: '...',
+ *   outputProcessors: [processor],
  * });
  * ```
  *
- * @see docs/02-processors.md for integration details
- * @see docs/04-learning-loop.md for the full extraction pipeline
+ * @see docs/mvp/03-phase-learning-loop.md
  */
-export function createSelfLearningProcessor(options: SelfLearningProcessorOptions) {
-  // TODO: Phase 2
-  //
-  // Return a Mastra Processor object implementing:
-  //
-  // {
-  //   name: 'self-learning',
-  //
-  //   processOutputStream({ part, streamParts, state }) {
-  //     // Accumulate tool call data in state
-  //     if (part.type === 'tool-call') {
-  //       state.toolCalls = state.toolCalls || [];
-  //       state.toolCalls.push(part);
-  //     }
-  //     if (part.type === 'tool-result') {
-  //       // Match result to call, record output
-  //     }
-  //     // Pass through — we observe, we don't transform
-  //     return part;
-  //   },
-  //
-  //   async processOutputResult({ messages }) {
-  //     // Called after the agent loop completes
-  //     // Evaluate accumulated trajectory for extraction
-  //     const trajectory: TaskTrajectory = buildTrajectory(state);
-  //     const result = await extractor.evaluate(trajectory);
-  //     if (result.triggered) {
-  //       // Skill created — log it
-  //     }
-  //     return messages; // Pass through unchanged
-  //   },
-  // }
+export function createSelfLearningProcessor(
+  options: SelfLearningProcessorOptions,
+): SelfLearningProcessor {
+  const storage =
+    options.storage instanceof SkillStorageExtension
+      ? options.storage
+      : new SkillStorageExtension(options.storage);
+  const search = new SkillSearch(storage);
+  const policy = ExtractionPolicySchema.parse(options.extraction ?? {});
+  const extractor = new SkillExtractor(storage, search, policy, options.generate);
+  const pending = new Set<Promise<unknown>>();
+  const pendingTimeoutMs = options.pendingTimeoutMs ?? 30_000;
+
+  function trackPending<T>(p: Promise<T>): Promise<T> {
+    pending.add(p);
+    void p.finally(() => pending.delete(p));
+    return p;
+  }
 
   return {
-    name: 'self-learning',
-    // Placeholder — will implement Processor interface from @mastra/core
+    id: 'self-learning' as const,
+    name: 'self-learning' as const,
+    description:
+      'Observes the agent loop, accumulates a task trajectory, and asynchronously extracts reusable skills when the trajectory meets the extraction policy thresholds.',
+
+    extractor,
+
+    processOutputStream(args) {
+      try {
+        observeChunk(args.part, args.state);
+      } catch (err) {
+        // Observer must never break the stream.
+        // eslint-disable-next-line no-console
+        console.warn(
+          '[mastra-self-learning] chunk observer threw; dropping observation.',
+          err instanceof Error ? err.message : err,
+        );
+      }
+      // Pass the chunk through unmodified.
+      return args.part;
+    },
+
+    async processOutputResult(args) {
+      try {
+        const trajectory = buildTrajectoryFromArgs(args, options.agentId ?? null);
+
+        // Fire-and-forget. Never propagate errors to the user-visible response.
+        const work = runExtraction(extractor, trajectory).catch((err) => {
+          // eslint-disable-next-line no-console
+          console.error('[mastra-self-learning] extraction error:', err);
+        });
+        trackPending(work);
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.error(
+          '[mastra-self-learning] processOutputResult threw before extraction; ignoring.',
+          err,
+        );
+      }
+      return args.messages ?? [];
+    },
+
+    async _waitForPendingExtractions() {
+      if (pending.size === 0) return;
+      const snapshot = Array.from(pending);
+      await Promise.race([
+        Promise.allSettled(snapshot),
+        new Promise<void>((resolve) => setTimeout(resolve, pendingTimeoutMs)),
+      ]);
+    },
   };
+}
+
+// ---------------------------------------------------------------------------
+// Internals
+// ---------------------------------------------------------------------------
+
+async function runExtraction(
+  extractor: SkillExtractor,
+  trajectory: TaskTrajectory,
+): Promise<void> {
+  const result = await extractor.evaluate(trajectory);
+  if (result.triggered) {
+    // eslint-disable-next-line no-console
+    console.info(
+      `[mastra-self-learning] extracted skill "${result.skill?.name ?? '(unknown)'}" — ${result.reason}`,
+    );
+  } else {
+    // Quieter at info, since negative results are normal.
+    // eslint-disable-next-line no-console
+    console.debug?.(`[mastra-self-learning] extraction skipped — ${result.reason}`);
+  }
+}
+
+function buildTrajectoryFromArgs(
+  args: ProcessOutputResultArgsLike,
+  fallbackAgentId: string | null,
+): TaskTrajectory {
+  const slState = readState(args.state);
+
+  // Prefer pre-aggregated steps from the result object — much cleaner than
+  // chunk-level accumulation. Fall back to streaming state if no result.steps.
+  const steps = args.result?.steps ?? [];
+  let toolCalls = slState.toolCalls;
+  if (steps.length > 0) {
+    toolCalls = [];
+    for (const step of steps) {
+      const calls = step.toolCalls ?? [];
+      const results = new Map<string, unknown>();
+      for (const r of step.toolResults ?? []) {
+        if (r.toolCallId) results.set(r.toolCallId, r.result ?? r.output);
+      }
+      for (const c of calls) {
+        const name = c.toolName ?? '(unknown)';
+        const input = (c.args ?? c.input ?? {}) as Record<string, unknown>;
+        const callId = c.toolCallId;
+        toolCalls.push({
+          name,
+          input,
+          output: callId ? results.get(callId) : undefined,
+          callId,
+          timestamp: new Date().toISOString(),
+        });
+      }
+    }
+  }
+
+  const finalUser =
+    args.messages?.slice().reverse().find((m) => m.role === 'user')?.content;
+  const finalAssistant =
+    args.result?.text ??
+    args.messages?.slice().reverse().find((m) => m.role === 'assistant')?.content;
+
+  const threadId = readContextString(args.requestContext, 'threadId') ?? 'unknown';
+  const agentId =
+    readContextString(args.requestContext, 'agentId') ?? fallbackAgentId ?? 'unknown';
+
+  return buildTrajectory({
+    state: {
+      ...slState,
+      // Prefer the unified `toolCalls` we just computed.
+      toolCalls,
+      // If `finish` chunks didn't fire, derive turnCount from step count.
+      turnCount: slState.turnCount > 0 ? slState.turnCount : steps.length,
+    },
+    threadId,
+    agentId,
+    finalUserMessage: typeof finalUser === 'string' ? finalUser : undefined,
+    finalAssistantMessage: typeof finalAssistant === 'string' ? finalAssistant : undefined,
+  });
+}
+
+function readContextString(
+  ctx: ProcessOutputResultArgsLike['requestContext'],
+  key: string,
+): string | undefined {
+  if (!ctx?.get) return undefined;
+  const val = ctx.get(key);
+  return typeof val === 'string' ? val : undefined;
 }
