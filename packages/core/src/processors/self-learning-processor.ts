@@ -19,6 +19,11 @@ import {
   buildRefinementSignals,
   type SelfLearningState,
 } from './chunk-observer.js';
+import {
+  makeSafeEmitter,
+  type SelfLearningEvent,
+  type SelfLearningEventHandler,
+} from './events.js';
 
 /**
  * Options for the self-learning output processor.
@@ -48,6 +53,12 @@ export interface SelfLearningProcessorOptions {
   refinementCooldownMs?: number;
   /** Owning agent ID. Used as the storage scope for extracted skills. */
   agentId?: string | null;
+  /**
+   * Optional observability hook. Invoked (best-effort, never throws into the
+   * loop) at extraction/refinement decision points. Powers external
+   * dashboards; precursor to Phase-6 OpenTelemetry. See {@link SelfLearningEvent}.
+   */
+  onEvent?: SelfLearningEventHandler;
   /**
    * Test-only: maximum time (ms) to wait for pending extractions during
    * `_waitForPendingExtractions()`. Default 30 s.
@@ -147,6 +158,7 @@ export function createSelfLearningProcessor(
     options.generate,
     options.refinementCooldownMs,
   );
+  const emit = makeSafeEmitter(options.onEvent);
   const pending = new Set<Promise<unknown>>();
   const pendingTimeoutMs = options.pendingTimeoutMs ?? 30_000;
 
@@ -185,7 +197,13 @@ export function createSelfLearningProcessor(
         const trajectory = buildTrajectoryFromArgs(args, options.agentId ?? null);
 
         // Fire-and-forget. Never propagate errors to the user-visible response.
-        const work = runExtraction(extractor, trajectory).catch((err) => {
+        const work = runExtraction(extractor, trajectory, emit).catch((err) => {
+          emit({
+            type: 'error',
+            agentId: trajectory.agentId,
+            threadId: trajectory.threadId,
+            reason: `extraction error: ${err instanceof Error ? err.message : String(err)}`,
+          });
           // eslint-disable-next-line no-console
           console.error('[mastra-self-learning] extraction error:', err);
         });
@@ -205,8 +223,16 @@ export function createSelfLearningProcessor(
               slState.skillUsed.name,
               trajectory,
               signals,
+              emit,
               finalUser,
             ).catch((err) => {
+              emit({
+                type: 'error',
+                agentId: trajectory.agentId,
+                threadId: trajectory.threadId,
+                reason: `refinement error: ${err instanceof Error ? err.message : String(err)}`,
+                skillName: slState.skillUsed?.name,
+              });
               // eslint-disable-next-line no-console
               console.error('[mastra-self-learning] refinement error:', err);
             });
@@ -238,18 +264,45 @@ export function createSelfLearningProcessor(
 // Internals
 // ---------------------------------------------------------------------------
 
+type Emit = (e: Omit<SelfLearningEvent, 'at'>) => void;
+
 async function runExtraction(
   extractor: SkillExtractor,
   trajectory: TaskTrajectory,
+  emit: Emit,
 ): Promise<void> {
   const result = await extractor.evaluate(trajectory);
+  emit({
+    type: 'extraction.evaluated',
+    agentId: trajectory.agentId,
+    threadId: trajectory.threadId,
+    reason: result.reason,
+    skillName: result.skill?.name,
+    skillId: result.skill?.id,
+  });
   if (result.triggered) {
+    emit({
+      type: 'extraction.completed',
+      agentId: trajectory.agentId,
+      threadId: trajectory.threadId,
+      reason: result.reason,
+      skillName: result.skill?.name,
+      skillId: result.skill?.id,
+      version: result.skill?.version,
+    });
     // eslint-disable-next-line no-console
     console.info(
       `[mastra-self-learning] extracted skill "${result.skill?.name ?? '(unknown)'}" — ${result.reason}`,
     );
   } else {
-    // Quieter at info, since negative results are normal.
+    emit({
+      type: 'extraction.skipped',
+      agentId: trajectory.agentId,
+      threadId: trajectory.threadId,
+      reason: result.reason,
+      skillName: result.skill?.name,
+      skillId: result.skill?.id,
+    });
     // eslint-disable-next-line no-console
     console.debug?.(`[mastra-self-learning] extraction skipped — ${result.reason}`);
   }
@@ -261,6 +314,7 @@ async function runRefinement(
   skillName: string,
   trajectory: TaskTrajectory,
   signals: import('../skills/types.js').RefinementSignals,
+  emit: Emit,
   finalUserMessage?: string,
 ): Promise<void> {
   const skill = await storage.getSkillByName(
@@ -269,10 +323,33 @@ async function runRefinement(
   );
   if (!skill) {
     // Skill was deleted between use and processor result — no-op.
+    emit({
+      type: 'refinement.skipped',
+      agentId: trajectory.agentId,
+      threadId: trajectory.threadId,
+      reason: 'skill no longer exists',
+      skillName,
+    });
     return;
   }
   const decision = await refiner.evaluate(skill, trajectory, signals);
+  emit({
+    type: 'refinement.evaluated',
+    agentId: trajectory.agentId,
+    threadId: trajectory.threadId,
+    reason: decision.reason ?? '(no reason)',
+    skillName: skill.name,
+    skillId: skill.id,
+  });
   if (!decision.shouldRefine) {
+    emit({
+      type: 'refinement.skipped',
+      agentId: trajectory.agentId,
+      threadId: trajectory.threadId,
+      reason: decision.reason ?? '(no reason)',
+      skillName: skill.name,
+      skillId: skill.id,
+    });
     // eslint-disable-next-line no-console
     console.debug?.(
       `[mastra-self-learning] refinement skipped for "${skillName}" — ${decision.reason}`,
@@ -280,6 +357,15 @@ async function runRefinement(
     return;
   }
   const updated = await refiner.refine(skill, trajectory, signals, finalUserMessage);
+  emit({
+    type: 'refinement.completed',
+    agentId: trajectory.agentId,
+    threadId: trajectory.threadId,
+    reason: decision.reason ?? '(no reason)',
+    skillName: updated.name,
+    skillId: updated.id,
+    version: updated.version,
+  });
   // eslint-disable-next-line no-console
   console.info(
     `[mastra-self-learning] refined skill "${updated.name}" → v${updated.version} (${decision.reason})`,

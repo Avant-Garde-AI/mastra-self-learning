@@ -166,12 +166,15 @@ describe('SkillRefiner.refine', () => {
     expect(updated.version).toBe('1.0.1');
     expect(updated.content).toMatch(/IAM propagation/);
 
+    // Single authoritative write: updateSkill carries the diff + reason on the
+    // active version row; no separate createVersion (would orphan a row).
     expect(storage.updateSkill).toHaveBeenCalledTimes(1);
-    expect(storage.createVersion).toHaveBeenCalledTimes(1);
-    const versionArg = (storage.createVersion as ReturnType<typeof vi.fn>).mock.calls[0][0];
-    expect(versionArg.version).toBe('1.0.1');
-    expect(versionArg.diffFromPrevious).toMatch(/IAM propagation/);
-    expect(versionArg.reason).toMatch(/execution failure/);
+    expect(storage.createVersion).not.toHaveBeenCalled();
+    const call = (storage.updateSkill as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(call[1].version).toBe('1.0.1');
+    const versionMeta = call[2];
+    expect(versionMeta.diff).toMatch(/IAM propagation/);
+    expect(versionMeta.reason).toMatch(/execution failure/);
   });
 
   it('retries once on unparseable output then succeeds', async () => {

@@ -356,7 +356,22 @@ export class SkillStorageExtension {
     return row ? rowToSkillRecord(row) : null;
   }
 
-  async updateSkill(id: string, updates: Partial<SkillRecord>): Promise<SkillRecord> {
+  /**
+   * Update a skill. Creates a new immutable version row, flips the active
+   * version to it, and refreshes the search projection — all in one
+   * transaction. This is the single authoritative versioning write; callers
+   * MUST NOT also call `createVersion` for the same change (that produces an
+   * orphan, non-active version row).
+   *
+   * @param versionMeta Optional unified diff + reason persisted on the new
+   *   active version row (used by refinement / manual updates so the active
+   *   version carries its own audit trail).
+   */
+  async updateSkill(
+    id: string,
+    updates: Partial<SkillRecord>,
+    versionMeta?: { diff?: string | null; reason?: string },
+  ): Promise<SkillRecord> {
     const existing = await this.getSkill(id);
     if (!existing) throw new Error(`Skill not found: ${id}`);
 
@@ -385,7 +400,16 @@ export class SkillStorageExtension {
     const newVersionId = ulid();
     const trustTier: TrustTier = updates.trustTier ?? existing.trustTier;
     const newStatus = mapStatus(updates.status ?? existing.status);
-    const newVersionMetadata = buildVersionMetadata(merged.frontmatter, trustTier);
+    // Explicit `updates.version` wins over frontmatter-derived semver so the
+    // ACTIVE version row reflects what the caller asked for (refiner passes
+    // the bumped version here).
+    const effectiveSemver =
+      updates.version ?? merged.frontmatter.version ?? existing.version;
+    const newVersionMetadata = buildVersionMetadata(merged.frontmatter, trustTier, {
+      semver: effectiveSemver,
+      diff: versionMeta?.diff,
+      reason: versionMeta?.reason,
+    });
     const newBody = extractBody(updates.content ?? existing.content);
 
     try {
@@ -399,8 +423,8 @@ export class SkillStorageExtension {
 
         await tx.none(
           `INSERT INTO mastra_skill_versions (
-             id, "skillId", "versionNumber", name, description, instructions, metadata, "createdAt"
-           ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+             id, "skillId", "versionNumber", name, description, instructions, metadata, "changeMessage", "createdAt"
+           ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
           [
             newVersionId,
             id,
@@ -409,6 +433,7 @@ export class SkillStorageExtension {
             merged.frontmatter.description,
             newBody,
             newVersionMetadata,
+            versionMeta?.reason ?? null,
             now,
           ],
         );

@@ -197,8 +197,9 @@ describe('Tier-1 tools — end-to-end through createTool execute()', () => {
     expect(result.skill.version).toBe('1.0.1');
 
     const versions = await storage.listVersions(result.skill.id);
-    // 3 versions exist: initial (auto), updateSkill bump, plus our explicit createVersion call
-    expect(versions.length).toBeGreaterThanOrEqual(2);
+    // 2 versions: initial (createSkill) + the single authoritative updateSkill
+    // write (which carries the diff/reason on the active row — no orphan).
+    expect(versions.length).toBe(2);
     const last = versions.find((v) => v.reason === 'add IAM pitfall');
     expect(last?.diffFromPrevious).toMatch(/IAM propagation/);
   });

@@ -41,6 +41,10 @@ export {
   type SelfLearningState,
   type SkillContextProcessor,
   type ProcessInputArgsLike,
+  makeSafeEmitter,
+  type SelfLearningEvent,
+  type SelfLearningEventType,
+  type SelfLearningEventHandler,
 } from './processors/index.js';
 
 // --- Tools ---

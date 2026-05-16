@@ -127,22 +127,19 @@ export class SkillRefiner {
     const { frontmatter } = parseSkillDocument(newContent);
     const diff = unifiedDiff(skill.content, newContent);
 
-    // Persist: update the active skill + record the version with its diff.
-    // updateSkill and createVersion each run their own transaction; the
-    // version row is the durable audit record even if the skill update is
-    // observed slightly later.
-    const updated = await this.storage.updateSkill(skill.id, {
-      content: newContent,
-      frontmatter,
-      version: decision.proposedVersion,
-    });
-    await this.storage.createVersion({
-      skillId: skill.id,
-      version: decision.proposedVersion,
-      content: newContent,
-      diffFromPrevious: diff,
-      reason: describeSignals(signals),
-    });
+    // Single authoritative write: updateSkill creates the new version row,
+    // flips activeVersionId to it, and persists the diff + reason ON that
+    // active row. (Calling createVersion separately would orphan a non-active
+    // duplicate row — that was the pre-harness bug.)
+    const updated = await this.storage.updateSkill(
+      skill.id,
+      {
+        content: newContent,
+        frontmatter,
+        version: decision.proposedVersion,
+      },
+      { diff, reason: describeSignals(signals) },
+    );
 
     return updated;
   }

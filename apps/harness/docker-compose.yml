@@ -1,0 +1,25 @@
+# Local Postgres (with pgvector) for the self-learning dev harness.
+#
+#   docker compose -f apps/harness/docker-compose.yml up -d
+#
+# DATABASE_URL: postgresql://postgres:postgres@localhost:5544/mastra_harness
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: msl-harness-pg
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: mastra_harness
+    ports:
+      - "5544:5432"
+    volumes:
+      - msl-harness-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d mastra_harness"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  msl-harness-pgdata:

@@ -277,19 +277,19 @@ export function createSelfLearningTools(options: SelfLearningToolsOptions) {
       const incoming = frontmatter.version;
       const newVersion =
         incoming && incoming !== existing.version ? incoming : bumpPatch(existing.version);
-      const updated = await storage.updateSkill(existing.id, {
-        content: inputData.content,
-        frontmatter,
-        version: newVersion,
-      });
       const diff = unifiedDiff(existing.content, inputData.content);
-      await storage.createVersion({
-        skillId: existing.id,
-        version: newVersion,
-        content: inputData.content,
-        diffFromPrevious: diff,
-        reason: inputData.reason,
-      });
+      // Single authoritative versioning write (see updateSkill JSDoc): the
+      // active version row carries the diff + reason; no separate
+      // createVersion (that would orphan a non-active duplicate).
+      const updated = await storage.updateSkill(
+        existing.id,
+        {
+          content: inputData.content,
+          frontmatter,
+          version: newVersion,
+        },
+        { diff, reason: inputData.reason },
+      );
       router.invalidate();
       return { skill: { id: updated.id, version: updated.version } };
     },

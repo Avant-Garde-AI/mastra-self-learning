@@ -14,6 +14,12 @@ export {
   buildRefinementSignals,
   type SelfLearningState,
 } from './chunk-observer.js';
+export {
+  makeSafeEmitter,
+  type SelfLearningEvent,
+  type SelfLearningEventType,
+  type SelfLearningEventHandler,
+} from './events.js';
 
 export {
   createSkillContextProcessor,
