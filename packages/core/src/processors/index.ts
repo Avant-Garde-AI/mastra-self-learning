@@ -9,7 +9,9 @@ export {
   observeChunk,
   readState,
   detectPositiveOutcome,
+  detectUserCorrection,
   buildTrajectory,
+  buildRefinementSignals,
   type SelfLearningState,
 } from './chunk-observer.js';
 

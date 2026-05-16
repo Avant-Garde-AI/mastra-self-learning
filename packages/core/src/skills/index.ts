@@ -46,6 +46,14 @@ export {
   buildSynthesisPrompt,
   normalizeSynthesisOutput,
 } from './synthesis-prompt.js';
-export { SkillRefiner } from './refiner.js';
+export {
+  SkillRefiner,
+  signalsActive,
+  type RefineEvaluation,
+} from './refiner.js';
+export {
+  buildRefinementPrompt,
+  describeSignals,
+} from './refinement-prompt.js';
 export { SkillSearch } from './search.js';
 export { scanSkillContent, type ScanResult, type ScanFinding } from './scanner.js';

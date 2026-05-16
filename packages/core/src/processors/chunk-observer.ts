@@ -224,6 +224,37 @@ export function buildTrajectory(args: {
   };
 }
 
+/**
+ * Heuristic: did the user correct the agent mid/post task? Cheap regex on the
+ * final user message. False positives are harmless (we just don't refine);
+ * false negatives mean we miss a refinement opportunity. Acceptable for MVP.
+ */
+export function detectUserCorrection(finalUserMessage?: string): boolean {
+  if (!finalUserMessage) return false;
+  return /\b(no,|wait,|actually,|that'?s wrong|that'?s not right|don'?t|stop\b|incorrect|wrong\b|not what i)\b/i.test(
+    finalUserMessage,
+  );
+}
+
+/**
+ * Build the MVP RefinementSignals from observer state + the final user
+ * message. Only `failure` and `userCorrection` are populated in v0.1.0; the
+ * other three remain `false` (deferred — they require procedure-diffing).
+ */
+export function buildRefinementSignals(
+  state: SelfLearningState,
+  finalUserMessage?: string,
+): import('../skills/types.js').RefinementSignals {
+  const failure = state.skillFeedbackCalls.some((f) => f.outcome === 'failure');
+  return {
+    deviation: false,
+    newPitfall: false,
+    unnecessaryStep: false,
+    userCorrection: detectUserCorrection(finalUserMessage),
+    failure,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------

@@ -8,6 +8,7 @@ import {
   type MastraPostgresLike,
 } from '../skills/storage-extension.js';
 import { SkillSearch } from '../skills/search.js';
+import { SkillRefiner, signalsActive } from '../skills/refiner.js';
 import {
   type AuxiliaryGenerate,
 } from '../skills/auxiliary-llm.js';
@@ -15,6 +16,8 @@ import {
   observeChunk,
   readState,
   buildTrajectory,
+  buildRefinementSignals,
+  type SelfLearningState,
 } from './chunk-observer.js';
 
 /**
@@ -37,6 +40,12 @@ export interface SelfLearningProcessorOptions {
   generate?: AuxiliaryGenerate;
   /** Extraction policy overrides. Defaults applied by `ExtractionPolicySchema.parse`. */
   extraction?: Partial<ExtractionPolicy>;
+  /**
+   * Minimum gap (ms) between refinements of the *same* skill. Prevents
+   * version-history churn when a skill fails repeatedly in quick succession.
+   * Defaults to 60 000 ms. Set to 0 to disable (useful in tests).
+   */
+  refinementCooldownMs?: number;
   /** Owning agent ID. Used as the storage scope for extracted skills. */
   agentId?: string | null;
   /**
@@ -57,12 +66,14 @@ export interface SelfLearningProcessor {
   processOutputStream(args: ProcessOutputStreamArgsLike): unknown;
   processOutputResult(args: ProcessOutputResultArgsLike): Promise<unknown>;
   /**
-   * Test-only helper: resolves when all fire-and-forget extraction promises
-   * triggered by recent `processOutputResult` calls have settled.
+   * Test-only helper: resolves when all fire-and-forget extraction *and
+   * refinement* promises triggered by recent `processOutputResult` calls have
+   * settled.
    */
   _waitForPendingExtractions(): Promise<void>;
-  /** Direct access for tests / Phase 5. */
+  /** Direct access for tests / advanced (backfill) callers. */
   readonly extractor: SkillExtractor;
+  readonly refiner: SkillRefiner;
 }
 
 /**
@@ -131,6 +142,11 @@ export function createSelfLearningProcessor(
   const search = new SkillSearch(storage);
   const policy = ExtractionPolicySchema.parse(options.extraction ?? {});
   const extractor = new SkillExtractor(storage, search, policy, options.generate);
+  const refiner = new SkillRefiner(
+    storage,
+    options.generate,
+    options.refinementCooldownMs,
+  );
   const pending = new Set<Promise<unknown>>();
   const pendingTimeoutMs = options.pendingTimeoutMs ?? 30_000;
 
@@ -147,6 +163,7 @@ export function createSelfLearningProcessor(
       'Observes the agent loop, accumulates a task trajectory, and asynchronously extracts reusable skills when the trajectory meets the extraction policy thresholds.',
 
     extractor,
+    refiner,
 
     processOutputStream(args) {
       try {
@@ -173,6 +190,29 @@ export function createSelfLearningProcessor(
           console.error('[mastra-self-learning] extraction error:', err);
         });
         trackPending(work);
+
+        // Refinement arm: if the agent used a skill and the trajectory shows a
+        // failure or user-correction signal, refine that skill. Independent
+        // fire-and-forget from extraction.
+        const slState = readState(args.state);
+        if (slState.skillUsed?.name) {
+          const finalUser = extractFinalUserMessage(args);
+          const signals = buildRefinementSignals(slState, finalUser);
+          if (signalsActive(signals)) {
+            const refineWork = runRefinement(
+              refiner,
+              storage,
+              slState.skillUsed.name,
+              trajectory,
+              signals,
+              finalUser,
+            ).catch((err) => {
+              // eslint-disable-next-line no-console
+              console.error('[mastra-self-learning] refinement error:', err);
+            });
+            trackPending(refineWork);
+          }
+        }
       } catch (err) {
         // eslint-disable-next-line no-console
         console.error(
@@ -213,6 +253,47 @@ async function runExtraction(
     // eslint-disable-next-line no-console
     console.debug?.(`[mastra-self-learning] extraction skipped — ${result.reason}`);
   }
+}
+
+async function runRefinement(
+  refiner: SkillRefiner,
+  storage: SkillStorageExtension,
+  skillName: string,
+  trajectory: TaskTrajectory,
+  signals: import('../skills/types.js').RefinementSignals,
+  finalUserMessage?: string,
+): Promise<void> {
+  const skill = await storage.getSkillByName(
+    skillName,
+    trajectory.agentId === 'unknown' ? undefined : trajectory.agentId,
+  );
+  if (!skill) {
+    // Skill was deleted between use and processor result — no-op.
+    return;
+  }
+  const decision = await refiner.evaluate(skill, trajectory, signals);
+  if (!decision.shouldRefine) {
+    // eslint-disable-next-line no-console
+    console.debug?.(
+      `[mastra-self-learning] refinement skipped for "${skillName}" — ${decision.reason}`,
+    );
+    return;
+  }
+  const updated = await refiner.refine(skill, trajectory, signals, finalUserMessage);
+  // eslint-disable-next-line no-console
+  console.info(
+    `[mastra-self-learning] refined skill "${updated.name}" → v${updated.version} (${decision.reason})`,
+  );
+}
+
+function extractFinalUserMessage(
+  args: ProcessOutputResultArgsLike,
+): string | undefined {
+  const m = args.messages
+    ?.slice()
+    .reverse()
+    .find((x) => x.role === 'user')?.content;
+  return typeof m === 'string' ? m : undefined;
 }
 
 function buildTrajectoryFromArgs(
