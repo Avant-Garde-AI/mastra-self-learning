@@ -6,7 +6,16 @@ import { AGENT_ID } from './storage.js';
 import { adminRoutes } from '../routes/admin.js';
 
 const CORS = {
-  origin: process.env.HARNESS_WEB_ORIGIN ?? 'http://localhost:5173',
+  // Dev harness: accept any localhost origin. Vite hops ports (5173→5174…)
+  // when one is taken, so pinning a single origin is fragile here. An explicit
+  // HARNESS_WEB_ORIGIN still wins if set.
+  origin: (origin: string) => {
+    const pinned = process.env.HARNESS_WEB_ORIGIN;
+    if (pinned) return origin === pinned ? origin : '';
+    return /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)
+      ? origin
+      : '';
+  },
   credentials: true,
   allowMethods: ['GET', 'POST', 'OPTIONS'],
   allowHeaders: ['Content-Type', 'Authorization'],
