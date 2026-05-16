@@ -73,3 +73,26 @@ POST /admin/demo                   run the scripted learning demo
 ```
 
 Chat runs through the AG-UI/Mastra CopilotKit bridge at `/copilotkit`.
+`POST /admin/chat {message,threadId}` drives the real agent for one turn
+(Tier-B UAT; requires an LLM key).
+
+## End-to-end UAT
+
+A CLI that asserts the system's capabilities against a running harness.
+
+```bash
+cp apps/harness/uat/.env.example apps/harness/uat/.env   # add ANTHROPIC_API_KEY
+pnpm --filter @avant-garde/harness-uat uat
+```
+
+- **Tier A** (always, no credentials) — runs the scripted demo and asserts the
+  full pipeline through the admin API: extraction, single-write versioning
+  (active v1.0.1 carries the diff), usage tracking, and loop events.
+- **Tier B** (requires `ANTHROPIC_API_KEY` on the *server*) — a real
+  Claude-backed agent must correctly operate the tool surface end-to-end:
+  `skill_create` → `skill_list`/`skill_view` → `skill_feedback` →
+  `skill_update` (new version + diff) → `memory_persist`/`memory_recall`
+  across threads.
+
+Exit code is non-zero if any scenario fails. Tier-B SKIPs (with guidance)
+when no key is configured.

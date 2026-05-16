@@ -1,0 +1,16 @@
+{
+  "name": "@avant-garde/harness-uat",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "bin": { "msl-uat": "./src/index.ts" },
+  "scripts": {
+    "uat": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^25.8.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}

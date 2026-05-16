@@ -4,6 +4,7 @@ import { skillStorage, factLayer, ensureReady, AGENT_ID } from '../mastra/storag
 import { hasLLM } from '../mastra/aux.js';
 import { recentEvents, subscribe, eventStats } from '../mastra/events.js';
 import { runSelfDemo } from '../mastra/demo.js';
+import { harnessAgent } from '../mastra/agent.js';
 
 const json = (c: any, body: unknown, status = 200) =>
   c.json(body as Record<string, unknown>, status);
@@ -141,6 +142,44 @@ export const adminRoutes = [
       await ensureReady();
       const result = await runSelfDemo();
       return json(c, result);
+    },
+  }),
+
+  // Drive the REAL self-learning agent for one turn (Tier-B UAT). Requires an
+  // LLM key — the input/output processors run as part of generate(), so a
+  // single call exercises retrieval (L0 injection) + the learning loop.
+  registerApiRoute('/admin/chat', {
+    method: 'POST',
+    requiresAuth: false,
+    handler: async (c) => {
+      if (!harnessAgent) {
+        return json(c, { error: 'no LLM key — set ANTHROPIC_API_KEY' }, 503);
+      }
+      await ensureReady();
+      const body = (await c.req.json().catch(() => ({}))) as {
+        message?: string;
+        threadId?: string;
+        resourceId?: string;
+      };
+      if (!body.message) return json(c, { error: 'message required' }, 400);
+      const threadId = body.threadId ?? `uat-${Date.now()}`;
+      const resourceId = body.resourceId ?? 'uat';
+      const started = Date.now();
+      const res = await harnessAgent.generate(body.message, {
+        memory: { thread: threadId, resource: resourceId },
+      });
+      const steps = (res as { steps?: Array<{ toolCalls?: Array<{ toolName?: string }> }> })
+        .steps ?? [];
+      const toolCalls = steps.flatMap((s) =>
+        (s.toolCalls ?? []).map((t) => t.toolName ?? '(unknown)'),
+      );
+      return json(c, {
+        text: (res as { text?: string }).text ?? '',
+        toolCalls,
+        threadId,
+        resourceId,
+        durationMs: Date.now() - started,
+      });
     },
   }),
 ];
