@@ -9,6 +9,7 @@ import type {
 } from './types.js';
 import type { TrustTier } from '../config.js';
 import { parseSkillDocument, serializeSkillDocument } from './parser.js';
+import { makeSafeEmbedder, toVectorLiteral, type EmbedText } from './embedding.js';
 
 /**
  * Minimal subset of Mastra's `PostgresStore` we depend on.
@@ -42,6 +43,13 @@ export interface SkillStorageExtensionOptions {
   trackVersions?: boolean;
   trackTrust?: boolean;
   trackExtraction?: boolean;
+  /**
+   * Optional embedder. When set (and pgvector is available) skill embeddings
+   * are computed on create/update for semantic search & dedup (v0.2.0).
+   */
+  embed?: EmbedText;
+  /** Embedding dimensions; must match `embed`. Default 1536. */
+  embeddingDimensions?: number;
 }
 
 /** Stable typed error for duplicate skill name within an agent scope. */
@@ -95,12 +103,16 @@ export class SkillStorageExtension {
   private storage: MastraPostgresLike;
   private vectorAvailable: boolean | null = null;
   private semanticEnabled = false;
+  private readonly embed: EmbedText | null;
+  private readonly embDim: number;
 
   constructor(
     storage: MastraPostgresLike,
     public readonly options: SkillStorageExtensionOptions = {},
   ) {
     this.storage = storage;
+    this.embed = makeSafeEmbedder(options.embed);
+    this.embDim = options.embeddingDimensions ?? 1536;
   }
 
   /**
@@ -238,7 +250,144 @@ export class SkillStorageExtension {
       await tx.none(
         `CREATE INDEX IF NOT EXISTS msl_skill_search_tags_idx ON mastra_self_learning_skill_search USING GIN (tags)`,
       );
+
+      // v0.2.0: typed embedding column + ANN index on the search projection.
+      if (this.vectorAvailable) {
+        await tx.none(
+          `ALTER TABLE mastra_self_learning_skill_search
+             ADD COLUMN IF NOT EXISTS embedding vector(${this.embDim})`,
+        );
+        await tx.none(
+          `CREATE INDEX IF NOT EXISTS msl_skill_search_vec_idx
+             ON mastra_self_learning_skill_search
+             USING hnsw (embedding vector_cosine_ops)`,
+        );
+        await tx.none(
+          `CREATE TABLE IF NOT EXISTS msl_meta (key TEXT PRIMARY KEY, value TEXT)`,
+        );
+      }
     });
+
+    // Embedding-dimension guard (outside the DDL tx). A model/dim change
+    // silently mis-ranks; detect, warn loudly, disable semantic until backfill.
+    if (this.vectorAvailable) {
+      try {
+        const row = await this.storage.db.oneOrNone<{ value: string }>(
+          `SELECT value FROM msl_meta WHERE key = 'embedding_dim'`,
+        );
+        if (!row) {
+          await this.storage.db.none(
+            `INSERT INTO msl_meta (key, value) VALUES ('embedding_dim', $1)
+             ON CONFLICT (key) DO NOTHING`,
+            [String(this.embDim)],
+          );
+        } else if (Number(row.value) !== this.embDim) {
+          this.semanticEnabled = false;
+          // eslint-disable-next-line no-console
+          console.warn(
+            `[mastra-self-learning] stored embedding dim ${row.value} != configured ${this.embDim}. ` +
+              `Semantic search disabled until backfillEmbeddings() re-embeds at the new dimension.`,
+          );
+        }
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          '[mastra-self-learning] embedding-dim guard check failed; continuing.',
+          err instanceof Error ? err.message : err,
+        );
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Embeddings
+  // -------------------------------------------------------------------------
+
+  /** True only when pgvector is usable AND an embedder is configured. */
+  get semanticReady(): boolean {
+    return this.semanticEnabled && this.vectorAvailable === true && !!this.embed;
+  }
+
+  /**
+   * Embed a skill's searchable surface (name + description + body). Returns
+   * null (degrade to FTS) when no embedder, pgvector unavailable, or on error.
+   */
+  private async computeEmbedding(
+    name: string,
+    description: string,
+    body: string,
+  ): Promise<number[] | null> {
+    if (!this.embed || !this.vectorAvailable) return null;
+    try {
+      const [vec] = await this.embed([`${name}\n${description}\n${body}`]);
+      if (!vec || vec.length !== this.embDim) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[mastra-self-learning] embedding dim ${vec?.length} != ${this.embDim}; skipping (FTS still works).`,
+        );
+        return null;
+      }
+      return vec;
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        '[mastra-self-learning] embedding failed; row stays FTS-only.',
+        err instanceof Error ? err.message : err,
+      );
+      return null;
+    }
+  }
+
+  /** Embed the caller's query text (used by SkillSearch / dedup). */
+  async embedQuery(text: string): Promise<number[] | null> {
+    if (!this.embed || !this.vectorAvailable) return null;
+    try {
+      const [vec] = await this.embed([text]);
+      return vec && vec.length === this.embDim ? vec : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Re-embed skill rows missing an embedding (or all, after a model/dim
+   * change). Idempotent; safe to call repeatedly. Returns count updated.
+   */
+  async backfillEmbeddings(opts?: { all?: boolean; limit?: number }): Promise<number> {
+    if (!this.semanticReady) return 0;
+    const limit = opts?.limit ?? 500;
+    const rows = await this.storage.db.any<{
+      skill_id: string;
+      name: string;
+      description: string;
+      instructions: string;
+    }>(
+      `SELECT skill_id, name, description, instructions
+         FROM mastra_self_learning_skill_search
+        WHERE ${opts?.all ? 'TRUE' : 'embedding IS NULL'}
+        LIMIT $1`,
+      [limit],
+    );
+    let n = 0;
+    for (const r of rows) {
+      const vec = await this.computeEmbedding(r.name, r.description, r.instructions);
+      if (!vec) continue;
+      await this.storage.db.none(
+        `UPDATE mastra_self_learning_skill_search SET embedding = $1::vector WHERE skill_id = $2`,
+        [toVectorLiteral(vec), r.skill_id],
+      );
+      n++;
+    }
+    if (n > 0) {
+      await this.storage.db.none(
+        `INSERT INTO msl_meta (key, value) VALUES ('embedding_dim', $1)
+         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+        [String(this.embDim)],
+      );
+      // A successful backfill clears a stale-dim disable.
+      if (this.vectorAvailable) this.semanticEnabled = true;
+    }
+    return n;
   }
 
   // -------------------------------------------------------------------------
@@ -259,6 +408,14 @@ export class SkillStorageExtension {
     // Serialize metadata for the version snapshot. We split: persisted markdown body
     // goes to instructions, learning-loop fields go to metadata.
     const versionMetadata = buildVersionMetadata(input.frontmatter, trustTier);
+
+    // Compute embedding BEFORE the tx (network call — don't hold the tx open).
+    const body = extractBody(input.content);
+    const embVec = await this.computeEmbedding(
+      input.frontmatter.name,
+      input.frontmatter.description,
+      body,
+    );
 
     try {
       await this.storage.db.tx(async (tx) => {
@@ -303,7 +460,7 @@ export class SkillStorageExtension {
             id,
             input.frontmatter.name,
             input.frontmatter.description,
-            extractBody(input.content),
+            body,
             trustTier,
             input.status,
             agentId,
@@ -311,6 +468,13 @@ export class SkillStorageExtension {
             now,
           ],
         );
+        if (embVec) {
+          await tx.none(
+            `UPDATE mastra_self_learning_skill_search
+               SET embedding = $1::vector WHERE skill_id = $2`,
+            [toVectorLiteral(embVec), id],
+          );
+        }
       });
     } catch (err) {
       throw rethrowAsTyped(err, input.frontmatter.name, agentId);
@@ -412,6 +576,20 @@ export class SkillStorageExtension {
     });
     const newBody = extractBody(updates.content ?? existing.content);
 
+    // Recompute the embedding only when the embedded surface actually changed.
+    const oldBody = extractBody(existing.content);
+    const contentChanged =
+      merged.frontmatter.name !== existing.frontmatter.name ||
+      merged.frontmatter.description !== existing.frontmatter.description ||
+      newBody !== oldBody;
+    const newEmbVec = contentChanged
+      ? await this.computeEmbedding(
+          merged.frontmatter.name,
+          merged.frontmatter.description,
+          newBody,
+        )
+      : null;
+
     try {
       await this.storage.db.tx(async (tx) => {
         // Determine new versionNumber.
@@ -457,6 +635,13 @@ export class SkillStorageExtension {
             id,
           ],
         );
+        if (newEmbVec) {
+          await tx.none(
+            `UPDATE mastra_self_learning_skill_search
+               SET embedding = $1::vector WHERE skill_id = $2`,
+            [toVectorLiteral(newEmbVec), id],
+          );
+        }
       });
     } catch (err) {
       throw rethrowAsTyped(err, merged.frontmatter.name, merged.agentId ?? null);
@@ -728,21 +913,32 @@ export class SkillStorageExtension {
   // -------------------------------------------------------------------------
 
   async search(options: SkillSearchOptions): Promise<SkillSearchResult[]> {
-    const mode = options.mode ?? 'fts';
-    if (mode === 'semantic' || mode === 'hybrid') {
-      throw new Error(
-        `SkillSearch mode "${mode}" is a Phase 4 feature. v0.1.0 supports FTS only.`,
-      );
+    let mode = options.mode ?? 'fts';
+    const query = options.query?.trim() ?? '';
+    const qvec = options.queryEmbedding;
+
+    // Degrade gracefully: semantic/hybrid without a query vector (no embedder,
+    // or pgvector unavailable) fall back to FTS rather than throwing.
+    if ((mode === 'semantic' || mode === 'hybrid') && (!qvec || !this.vectorAvailable)) {
+      mode = 'fts';
     }
+    if (mode === 'fts' && !query) return [];
 
-    const query = options.query?.trim();
-    if (!query) return [];
+    // Build params per-mode so no parameter is left unreferenced (Postgres
+    // errors with "could not determine data type" on an unused $n).
+    const params: unknown[] = [];
+    const where: string[] = [`search.status = 'active'`];
 
-    const params: unknown[] = [query];
-    const where: string[] = [
-      `search.search_vector @@ plainto_tsquery('english', $1)`,
-      `search.status = 'active'`,
-    ];
+    let txtIdx = 0;
+    if (mode === 'fts' || mode === 'hybrid') {
+      params.push(query);
+      txtIdx = params.length; // $txtIdx = query text
+    }
+    let vecIdx = 0;
+    if (qvec && (mode === 'semantic' || mode === 'hybrid')) {
+      params.push(toVectorLiteral(qvec));
+      vecIdx = params.length; // $vecIdx = query vector literal
+    }
 
     if (options.agentId !== undefined) {
       params.push(options.agentId);
@@ -750,17 +946,37 @@ export class SkillStorageExtension {
         `(($${params.length}::text IS NULL AND search.agent_id IS NULL) OR search.agent_id = $${params.length})`,
       );
     }
-
     if (options.trustTiers && options.trustTiers.length > 0) {
       params.push(options.trustTiers);
       where.push(`search.trust_tier = ANY($${params.length}::text[])`);
     }
-
     if (options.tags && options.tags.length > 0) {
       params.push(options.tags);
       where.push(`search.tags && $${params.length}::text[]`);
     }
 
+    const w = Math.min(1, Math.max(0, options.semanticWeight ?? 0.7));
+    let scoreExpr: string;
+    let candidate: string;
+    let orderBy: string;
+
+    if (mode === 'semantic') {
+      // cosine similarity 0..1, nearest first
+      scoreExpr = `(1 - (search.embedding <=> $${vecIdx}::vector))`;
+      candidate = `search.embedding IS NOT NULL`;
+      orderBy = `search.embedding <=> $${vecIdx}::vector ASC, search.skill_id ASC`;
+    } else if (mode === 'hybrid') {
+      const sem = `COALESCE(1 - (search.embedding <=> $${vecIdx}::vector), 0)`;
+      const fts = `COALESCE(ts_rank_cd(search.search_vector, plainto_tsquery('english', $${txtIdx})), 0)`;
+      scoreExpr = `(${w} * ${sem} + ${1 - w} * (${fts} / (1 + ${fts})))`;
+      candidate = `(search.embedding IS NOT NULL OR search.search_vector @@ plainto_tsquery('english', $${txtIdx}))`;
+      orderBy = `score DESC, search.skill_id ASC`;
+    } else {
+      scoreExpr = `ts_rank_cd(search.search_vector, plainto_tsquery('english', $${txtIdx}))`;
+      candidate = `search.search_vector @@ plainto_tsquery('english', $${txtIdx})`;
+      orderBy = `score DESC, search.skill_id ASC`;
+    }
+    where.push(candidate);
     params.push(options.limit ?? 10);
 
     const sql = `
@@ -773,24 +989,25 @@ export class SkillStorageExtension {
         COALESCE(stats.fail_count, 0)    AS fail_count,
         stats.last_used,
         search.trust_tier,
-        ts_rank_cd(search.search_vector, plainto_tsquery('english', $1)) AS rank
+        ${scoreExpr} AS score
       FROM mastra_self_learning_skill_search search
       INNER JOIN mastra_skills s ON s.id = search.skill_id
       INNER JOIN mastra_skill_versions v ON v.id = s."activeVersionId"
       LEFT JOIN mastra_self_learning_skill_stats stats ON stats.skill_id = s.id
       WHERE ${where.join(' AND ')}
-      ORDER BY rank DESC
+      ORDER BY ${orderBy}
       LIMIT $${params.length}
     `;
 
-    const rows = await this.storage.db.any<SkillRowJoined & { rank: number | string }>(
+    const rows = await this.storage.db.any<SkillRowJoined & { score: number | string }>(
       sql,
       params,
     );
+    const matchType = mode as 'fts' | 'semantic' | 'hybrid';
     return rows.map((row) => ({
       skill: rowToSkillRecord(row),
-      score: Number(row.rank ?? 0),
-      matchType: 'fts' as const,
+      score: Number(row.score ?? 0),
+      matchType,
     }));
   }
 }

@@ -3,7 +3,7 @@ import { streamSSE } from 'hono/streaming';
 import { skillStorage, factLayer, ensureReady, AGENT_ID } from '../mastra/storage.js';
 import { hasLLM } from '../mastra/aux.js';
 import { recentEvents, subscribe, eventStats } from '../mastra/events.js';
-import { runSelfDemo } from '../mastra/demo.js';
+import { runSelfDemo, runDedupProbe } from '../mastra/demo.js';
 import { harnessAgent } from '../mastra/agent.js';
 
 const json = (c: any, body: unknown, status = 200) =>
@@ -142,6 +142,16 @@ export const adminRoutes = [
       await ensureReady();
       const result = await runSelfDemo();
       return json(c, result);
+    },
+  }),
+
+  // R7 acceptance: semantic dedup of a near-identical extraction.
+  registerApiRoute('/admin/dedup-probe', {
+    method: 'POST',
+    requiresAuth: false,
+    handler: async (c) => {
+      await ensureReady();
+      return json(c, await runDedupProbe());
     },
   }),
 

@@ -12,6 +12,7 @@ import {
   type MastraPostgresLike,
 } from '../skills/storage-extension.js';
 import { SkillRouter } from '../skills/router.js';
+import type { EmbedText } from '../skills/embedding.js';
 import { FactLayer } from '../memory/fact-layer.js';
 import { IdentityLayer } from '../memory/identity.js';
 
@@ -29,6 +30,12 @@ export interface SkillContextProcessorOptions {
   skillRouter?: Partial<SkillRouterConfig>;
   /** Owning agent ID — scopes skills + facts. */
   agentId?: string | null;
+  /**
+   * Optional embedder. Enables the `relevant` overflow strategy to rank the
+   * L0 index by similarity to the current conversation (v0.2.0). Ignored when
+   * `storage` is an already-constructed extension (carries its own).
+   */
+  embed?: EmbedText;
 }
 
 /**
@@ -78,13 +85,20 @@ export function createSkillContextProcessor(
   const storage =
     options.storage instanceof SkillStorageExtension
       ? options.storage
-      : new SkillStorageExtension(options.storage);
+      : new SkillStorageExtension(options.storage, { embed: options.embed });
 
   const routerConfig = SkillRouterConfigSchema.parse(options.skillRouter ?? {});
   const factConfig = FactLayerConfigSchema.parse(options.factLayer ?? {});
   const identityConfig = IdentityLayerConfigSchema.parse({});
 
-  const router = new SkillRouter(storage, routerConfig, options.agentId);
+  const router = new SkillRouter(
+    storage,
+    routerConfig,
+    options.agentId,
+    undefined,
+    undefined,
+    options.embed,
+  );
   const factLayer = new FactLayer(storage, factConfig, options.agentId ?? null);
   const identityLayer = new IdentityLayer(
     storage,
@@ -133,9 +147,12 @@ export function createSkillContextProcessor(
         }
       }
 
+      // Recent conversation text drives the `relevant` overflow strategy.
+      const contextText = extractRecentUserText(messages);
+
       let skillIndex = '';
       try {
-        skillIndex = await router.buildIndex();
+        skillIndex = await router.buildIndex(contextText);
       } catch (err) {
         // eslint-disable-next-line no-console
         console.warn(
@@ -176,4 +193,26 @@ export function createSkillContextProcessor(
       return { messages, systemMessages: nextSystem };
     },
   };
+}
+
+/** Pull the most recent user message text for the `relevant` overflow ranker. */
+function extractRecentUserText(messages: unknown[]): string | undefined {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i] as { role?: string; content?: unknown } | undefined;
+    if (m?.role !== 'user') continue;
+    const c = m.content;
+    if (typeof c === 'string') return c;
+    if (Array.isArray(c)) {
+      const text = c
+        .map((p) =>
+          p && typeof p === 'object' && 'text' in p
+            ? String((p as { text?: unknown }).text ?? '')
+            : '',
+        )
+        .join(' ')
+        .trim();
+      if (text) return text;
+    }
+  }
+  return undefined;
 }

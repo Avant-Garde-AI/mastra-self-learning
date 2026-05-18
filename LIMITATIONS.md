@@ -1,9 +1,22 @@
-# Limitations — v0.1.0 (alpha)
+# Limitations — v0.1.0 alpha + v0.2.0 Phase 1
 
-`@avant-garde/mastra-self-learning` v0.1.0 is an **alpha**. It delivers one
-closed learning loop end-to-end. This document states honestly what works,
-what does not, and what is coming — so you can decide whether it fits your use
-case today.
+`@avant-garde/mastra-self-learning` is an **alpha**. v0.1.0 delivered the
+closed learning loop; v0.2.0 Phase 1 added embedding-grade retrieval. This
+document states honestly what works, what does not, and what is coming.
+
+## Shipped since v0.1.0 (v0.2.0 Phase 1 — closes R1/R2/R3 + risk R7)
+
+- **Semantic + hybrid skill search** — pgvector cosine over per-skill
+  embeddings; `mode: 'hybrid'` blends FTS + semantic; callback `EmbedText`
+  seam + shipped `openAIEmbedder`; graceful FTS degrade with no embedder.
+- **`relevant` router overflow** — ranks the L0 index by similarity to the
+  live conversation; `recent` fallback retained for the no-embedder path.
+- **Semantic deduplication (risk R7 CLOSED)** — dedup now runs on the
+  *synthesized* skill content (skill↔skill, like-with-like) vs
+  `deduplicationThreshold`; the v0.1.0 "near-duplicate slips through" gap is
+  gone. Proven by core tests + harness UAT Tier-A A5.
+
+The remaining v0.2.0 backlog (Phases 2–6) is tracked in `docs/v0.2.0/`.
 
 ## What works today
 
@@ -42,9 +55,9 @@ Concretely shipped and verified (176 passing tests):
 
 | Capability | Status | Target |
 |---|---|---|
-| Semantic skill search (embeddings / pgvector) | Not implemented; FTS only | v0.2.0 |
-| `relevant` router overflow strategy | Falls back to `recent` | v0.2.0 |
-| Gardening workflows (dedup/decay/quality/drift cron) | Not implemented; `applyDecay()` exists but is unscheduled | v0.2.0 |
+| ~~Semantic skill search~~ | ✅ Shipped (v0.2.0 P1) | — |
+| ~~`relevant` router overflow~~ | ✅ Shipped (v0.2.0 P1) | — |
+| Gardening workflows (dedup/decay/quality/drift cron) | Not implemented; `applyDecay()` exists but is unscheduled | v0.2.0 P2 |
 | Identity drift detection / calibration storage | Throws Phase-6 marker | v0.2.0 |
 | Refinement signals beyond failure/user-correction (deviation, new-pitfall, unnecessary-step) | Not implemented (require procedure-diffing) | v0.2.0 |
 | Harness integration (learn mode, subagents) | Not implemented | v0.2.0 |
@@ -58,11 +71,11 @@ Concretely shipped and verified (176 passing tests):
 
 ## Known issues / sharp edges
 
-1. **FTS deduplication is coarse.** Dedup queries the trajectory's tool names
-   against the synthesized skill body. Because synthesis deliberately
-   abstracts concrete tool names into prose, a second near-identical task can
-   slip past dedup and create a near-duplicate skill. Semantic dedup (v0.2.0)
-   fixes this. (Risk R7.)
+1. ~~**FTS deduplication is coarse.**~~ **RESOLVED (v0.2.0 P1, risk R7
+   closed).** Dedup now runs on the *synthesized* skill content and compares
+   it semantically (cosine) against existing skill embeddings — skill↔skill,
+   so abstracted tool names no longer cause near-duplicates to slip through.
+   With no embedder configured it degrades to FTS (documented).
 
 2. **Token estimation is a heuristic.** `chars / 4`. Over-estimates for
    code-heavy skills (~20–40%), under-estimates for non-English text

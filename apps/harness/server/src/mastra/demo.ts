@@ -4,7 +4,7 @@ import {
   serializeSkillDocument,
   type AuxiliaryGenerate,
 } from '@avant-garde/mastra-self-learning';
-import { skillStorage, AGENT_ID } from './storage.js';
+import { skillStorage, AGENT_ID, embedder } from './storage.js';
 import { recordEvent } from './events.js';
 
 /**
@@ -78,10 +78,21 @@ ${pitfalls}
     return async () => queue.shift() ?? 'NO';
   })();
 
+  // Each demo run must be deterministic. With semantic dedup now live,
+  // prior demo skills (near-identical bodies) would correctly dedup a fresh
+  // run's ACT-1 extraction. Clear prior demo-tagged skills first so every
+  // run extracts+refines cleanly. (Cascades to versions/stats/search/usage.)
+  await skillStorage.db.none(
+    `DELETE FROM mastra_skills WHERE id IN (
+       SELECT skill_id FROM mastra_self_learning_skill_search WHERE 'demo' = ANY(tags)
+     )`,
+  );
+
   const proc = createSelfLearningProcessor({
     storage: skillStorage,
     agentId: AGENT_ID,
     generate,
+    embed: embedder,
     extraction: { minToolCalls: 4, minTurns: 2, cooldownMs: 0 },
     refinementCooldownMs: 0,
     onEvent: recordEvent,
@@ -186,4 +197,61 @@ ${pitfalls}
   }
 
   return { skillName, extracted, refined };
+}
+
+/**
+ * R7 acceptance probe: take an existing skill, run a qualifying extraction
+ * whose synthesized content is (near-)identical, and confirm semantic dedup
+ * routes it to the existing skill instead of storing a near-duplicate.
+ */
+export async function runDedupProbe(): Promise<{
+  ran: boolean;
+  deduped: boolean;
+  reason: string;
+  against?: string;
+}> {
+  const existing = (await skillStorage.listSkills({ agentId: AGENT_ID, limit: 1 }))[0];
+  if (!existing) {
+    return { ran: false, deduped: false, reason: 'no skill to probe against' };
+  }
+
+  // Scripted aux LLM: YES to generalizability, then re-emit the existing
+  // skill's own content (a maximal near-duplicate).
+  const queue = ['YES', existing.content];
+  const generate: AuxiliaryGenerate = async () => queue.shift() ?? 'NO';
+
+  const proc = createSelfLearningProcessor({
+    storage: skillStorage,
+    agentId: AGENT_ID,
+    generate,
+    embed: embedder,
+    extraction: { minToolCalls: 4, minTurns: 2, cooldownMs: 0 },
+    refinementCooldownMs: 0,
+    onEvent: recordEvent,
+  });
+
+  const before = (await skillStorage.listSkills({ agentId: AGENT_ID, limit: 500 })).length;
+
+  const trajectory = {
+    toolCalls: Array.from({ length: 6 }, (_, i) => ({
+      name: `gcloud_run_describe`,
+      input: { i },
+      timestamp: new Date().toISOString(),
+    })),
+    turnCount: 4,
+    positiveOutcome: true,
+    threadId: `dedup-probe-${ulid().slice(-6)}`,
+    agentId: AGENT_ID,
+    conversationSummary: existing.frontmatter.description ?? existing.name,
+  };
+  const result = await proc.extractor.evaluate(trajectory);
+
+  const after = (await skillStorage.listSkills({ agentId: AGENT_ID, limit: 500 })).length;
+  const deduped = !result.triggered && after === before;
+  return {
+    ran: true,
+    deduped,
+    reason: result.reason,
+    against: existing.name,
+  };
 }

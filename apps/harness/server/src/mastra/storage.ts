@@ -3,6 +3,9 @@ import {
   SkillStorageExtension,
   FactLayer,
   FactLayerConfigSchema,
+  openAIEmbedder,
+  hashEmbedder,
+  type EmbedText,
   type MastraPostgresLike,
 } from '@avant-garde/mastra-self-learning';
 
@@ -17,8 +20,17 @@ export const store = new PostgresStore({
   connectionString: DATABASE_URL,
 });
 
+// OpenAI embedder when a key is set; otherwise a deterministic local
+// embedder so semantic search / dedup work keyless in the harness + UAT.
+const OPENAI_KEY = process.env.OPENAI_API_KEY ?? '';
+export const usingRealEmbedder = OPENAI_KEY.length > 0;
+export const embedder: EmbedText = usingRealEmbedder
+  ? openAIEmbedder({ apiKey: OPENAI_KEY, model: 'text-embedding-3-small', dimensions: 1536 })
+  : hashEmbedder(1536);
+
 export const skillStorage = new SkillStorageExtension(
   store as unknown as MastraPostgresLike,
+  { embed: embedder, embeddingDimensions: 1536 },
 );
 
 export const factLayer = new FactLayer(

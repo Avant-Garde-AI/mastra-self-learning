@@ -17,7 +17,7 @@ import {
 // Mastra's concrete `Processor` unions at the single integration seam.
 const asInput = (p: unknown) => p as unknown as InputProcessorOrWorkflow;
 const asOutput = (p: unknown) => p as unknown as OutputProcessorOrWorkflow;
-import { skillStorage, AGENT_ID } from './storage.js';
+import { skillStorage, AGENT_ID, embedder } from './storage.js';
 import { chatModel, auxGenerate, hasLLM } from './aux.js';
 import { recordEvent } from './events.js';
 
@@ -54,7 +54,7 @@ export const harnessAgent: Agent | undefined = hasLLM
         'After using a skill, call skill_feedback with the outcome.',
       model: chatModel!,
       tools: {
-        ...createSelfLearningTools({ storage: skillStorage, agentId: AGENT_ID }),
+        ...createSelfLearningTools({ storage: skillStorage, agentId: AGENT_ID, embed: embedder }),
       },
       inputProcessors: [
         asInput(
@@ -63,6 +63,8 @@ export const harnessAgent: Agent | undefined = hasLLM
             agentId: AGENT_ID,
             identity: IDENTITY,
             factLayer: { enabled: true, nudgeInterval: 6 },
+            embed: embedder,
+            skillRouter: { overflowStrategy: 'relevant' },
           }),
         ),
       ],
@@ -72,6 +74,7 @@ export const harnessAgent: Agent | undefined = hasLLM
             storage: skillStorage,
             agentId: AGENT_ID,
             generate: auxGenerate,
+            embed: embedder,
             extraction: { minToolCalls: 4, minTurns: 2, cooldownMs: 15_000 },
             refinementCooldownMs: 10_000,
             onEvent: recordEvent,

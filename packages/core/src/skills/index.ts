@@ -31,6 +31,15 @@ export {
 } from './token-budget.js';
 export { bumpPatch, bumpMinor, bumpMajor, unifiedDiff } from './version-utils.js';
 export {
+  type EmbedText,
+  EmbeddingDimensionError,
+  makeSafeEmbedder,
+  cosineSim,
+  toVectorLiteral,
+  openAIEmbedder,
+  hashEmbedder,
+} from './embedding.js';
+export {
   SkillExtractor,
   distinctToolCallCount,
   type TaskTrajectory,

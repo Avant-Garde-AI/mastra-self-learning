@@ -467,13 +467,48 @@ describe('SkillStorageExtension.search (FTS)', () => {
     expect(results).toEqual([]);
   });
 
-  it('throws on semantic / hybrid modes', async () => {
-    await expect(
-      storage.search({ query: 'x', mode: 'semantic', agentId: 'ops-agent' }),
-    ).rejects.toThrow(/Phase 4/);
-    await expect(
-      storage.search({ query: 'x', mode: 'hybrid', agentId: 'ops-agent' }),
-    ).rejects.toThrow(/Phase 4/);
+  it('semantic / hybrid without a query vector degrade to FTS (no throw)', async () => {
+    // This `storage` has no embedder configured.
+    const sem = await storage.search({
+      query: 'kubernetes rollback',
+      mode: 'semantic',
+      agentId: 'ops-agent',
+    });
+    const hyb = await storage.search({
+      query: 'kubernetes rollback',
+      mode: 'hybrid',
+      agentId: 'ops-agent',
+    });
+    expect(sem.length).toBeGreaterThan(0);
+    expect(hyb.length).toBeGreaterThan(0);
+    expect(sem[0].matchType).toBe('fts');
+    expect(hyb[0].matchType).toBe('fts');
+  });
+
+  it('semantic search with a query embedding ranks by cosine (pgvector)', async () => {
+    const { SkillStorageExtension } = await import('../src/skills/storage-extension.js');
+    const { hashEmbedder } = await import('../src/skills/embedding.js');
+    // The vector column dim is fixed by the suite's beforeAll storage (1536).
+    const embed = hashEmbedder(1536);
+    const semStore = new SkillStorageExtension(store as unknown as never, {
+      embed,
+      embeddingDimensions: 1536,
+    });
+    await semStore.ensureSchema();
+    await semStore.backfillEmbeddings({ all: true });
+
+    const [qvec] = await embed(['rollback a kubernetes deployment']);
+    const results = await semStore.search({
+      query: 'rollback a kubernetes deployment',
+      mode: 'semantic',
+      queryEmbedding: qvec,
+      agentId: 'ops-agent',
+      limit: 5,
+    });
+    expect(results.length).toBeGreaterThan(0);
+    expect(results[0].matchType).toBe('semantic');
+    expect(results[0].skill.name).toBe('k8s-rollback');
+    expect(results[0].score).toBeGreaterThan(0);
   });
 
   it('filters by agentId', async () => {

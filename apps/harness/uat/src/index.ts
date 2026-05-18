@@ -218,6 +218,19 @@ async function run(
     return `uses=${d.usage.totalUses} fail=${d.skill.failCount} events=[${[...types].join(', ')}]`;
   });
 
+  await run('A5', 'A', 'Semantic dedup: near-identical extraction is deduped (closes R7)', async () => {
+    const r = await post<{
+      ran: boolean;
+      deduped: boolean;
+      reason: string;
+      against?: string;
+    }>('/admin/dedup-probe');
+    assert(r.ran, 'probe could not run (no skill to probe against)');
+    assert(r.deduped, `near-duplicate was NOT deduped (reason: ${r.reason})`);
+    assert(/duplicate/i.test(r.reason), `unexpected reason: ${r.reason}`);
+    return `deduped vs "${r.against}" — ${r.reason}`;
+  });
+
   // ── Tier B: real LLM operating the tool surface ────────────────────────
   const A = 'You have self-learning skill/memory tools. ';
   await run(

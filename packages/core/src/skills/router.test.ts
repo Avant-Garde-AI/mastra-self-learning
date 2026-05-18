@@ -144,12 +144,64 @@ describe('SkillRouter.buildIndex', () => {
       indexBudget: 30,
       overflowStrategy: 'relevant',
     });
+    // No embedder configured → relevant degrades to recent, warns once.
     const router = new SkillRouter(makeMockStorage([a, b]), cfg);
     await router.buildIndex();
     await router.buildIndex(); // second call should not warn again
     expect(spy.mock.calls.length).toBe(1);
-    expect(spy.mock.calls[0][0]).toMatch(/Phase 4/);
+    expect(spy.mock.calls[0][0]).toMatch(/needs an embedder/);
     spy.mockRestore();
+  });
+
+  it('"relevant" with an embedder ranks by similarity to context', async () => {
+    // Deterministic stub embedder: cosine driven by shared tokens.
+    const embed = async (texts: string[]) =>
+      texts.map((t) => {
+        const v = new Array(64).fill(0);
+        for (const tok of t.toLowerCase().match(/[a-z0-9]+/g) ?? []) {
+          let h = 0;
+          for (let i = 0; i < tok.length; i++) h = (h * 31 + tok.charCodeAt(i)) | 0;
+          v[Math.abs(h) % 64] += 1;
+        }
+        const n = Math.sqrt(v.reduce((s, x) => s + x * x, 0)) || 1;
+        return v.map((x) => x / n);
+      });
+    const deploy = mkSkill({
+      id: 'd',
+      name: 'deploy-cloud-run',
+      lastUsed: '2026-01-01T00:00:00Z',
+      frontmatter: {
+        ...baseFrontmatter,
+        name: 'deploy-cloud-run',
+        description: 'deploy a containerized service to cloud run',
+      },
+    });
+    const rollback = mkSkill({
+      id: 'r',
+      name: 'k8s-rollback',
+      lastUsed: '2026-05-15T00:00:00Z',
+      frontmatter: {
+        ...baseFrontmatter,
+        name: 'k8s-rollback',
+        description: 'rollback a kubernetes deployment to a previous revision',
+      },
+    });
+    const cfg = SkillRouterConfigSchema.parse({
+      indexBudget: 24,
+      overflowStrategy: 'relevant',
+    });
+    const router = new SkillRouter(
+      makeMockStorage([rollback, deploy]),
+      cfg,
+      undefined,
+      undefined,
+      undefined,
+      embed,
+    );
+    const index = await router.buildIndex('I need to deploy a containerized service to cloud run');
+    // deploy-cloud-run is most relevant to the context → kept over rollback.
+    expect(index).toContain('deploy-cloud-run');
+    expect(index).not.toContain('k8s-rollback');
   });
 
   it('caches the result for the TTL window', async () => {

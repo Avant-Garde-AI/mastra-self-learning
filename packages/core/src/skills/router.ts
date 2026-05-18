@@ -3,6 +3,7 @@ import type { SkillRecord } from './types.js';
 import type { SkillStorageExtension } from './storage-extension.js';
 import { extractSection, parseSkillDocument } from './parser.js';
 import { defaultEstimator, type TokenEstimator } from './token-budget.js';
+import { makeSafeEmbedder, cosineSim, type EmbedText } from './embedding.js';
 
 /**
  * Manages token-aware progressive disclosure of skills.
@@ -34,14 +35,18 @@ export class SkillRouter {
    * @param cacheTtlMs Cache TTL for `buildIndex()`. Defaults to 30 seconds.
    *                   Set to 0 to disable caching.
    */
+  private readonly embed: EmbedText | null;
+
   constructor(
     private storage: SkillStorageExtension,
     private config: SkillRouterConfig,
     public readonly agentId: string | null | undefined = undefined,
     estimator?: TokenEstimator,
     private cacheTtlMs: number = 30_000,
+    embed?: EmbedText,
   ) {
     this.estimator = estimator ?? defaultEstimator;
+    this.embed = makeSafeEmbedder(embed);
   }
 
   /**
@@ -54,9 +59,15 @@ export class SkillRouter {
    *     to `recent` in MVP (Phase 4 wires up embeddings).
    *   - Result is cached for `cacheTtlMs` milliseconds.
    */
-  async buildIndex(): Promise<string> {
+  async buildIndex(contextText?: string): Promise<string> {
     const now = Date.now();
-    if (this.indexCache && this.indexCache.expiresAt > now) {
+    const relevantMode =
+      this.config.overflowStrategy === 'relevant' &&
+      !!this.embed &&
+      !!contextText?.trim();
+
+    // The `relevant` index varies per request — bypass the cache for it.
+    if (!relevantMode && this.indexCache && this.indexCache.expiresAt > now) {
       return this.indexCache.value;
     }
 
@@ -67,8 +78,8 @@ export class SkillRouter {
       limit: 200,
     });
 
-    const value = this.formatIndex(skills);
-    if (this.cacheTtlMs > 0) {
+    const value = await this.formatIndex(skills, contextText);
+    if (!relevantMode && this.cacheTtlMs > 0) {
       this.indexCache = { value, expiresAt: now + this.cacheTtlMs };
     }
     return value;
@@ -118,7 +129,10 @@ export class SkillRouter {
   // Internals
   // -------------------------------------------------------------------------
 
-  private formatIndex(skills: SkillRecord[]): string {
+  private async formatIndex(
+    skills: SkillRecord[],
+    contextText?: string,
+  ): Promise<string> {
     const header = '# Available Skills';
     if (skills.length === 0) {
       return `${header}\n\n(none yet)`;
@@ -135,7 +149,7 @@ export class SkillRouter {
 
     // Apply overflow strategy.
     const strategy = this.config.overflowStrategy;
-    const sorted = this.applyOverflowSort(skills, strategy);
+    const sorted = await this.applyOverflowSort(skills, strategy, contextText);
     return this.trimToBudget(header, sorted);
   }
 
@@ -152,17 +166,30 @@ export class SkillRouter {
     }
   }
 
-  private applyOverflowSort(
+  private async applyOverflowSort(
     skills: SkillRecord[],
     strategy: SkillRouterConfig['overflowStrategy'],
-  ): SkillRecord[] {
+    contextText?: string,
+  ): Promise<SkillRecord[]> {
     if (strategy === 'relevant') {
-      // MVP fallback — log once per process per router instance.
+      if (this.embed && contextText?.trim()) {
+        try {
+          return await this.sortByRelevance(skills, contextText);
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn(
+            '[mastra-self-learning] relevant ranking failed; using "recent".',
+            err instanceof Error ? err.message : err,
+          );
+          return this.sortByRecent(skills);
+        }
+      }
+      // No embedder or no context — fall back to recent, warn once.
       if (!this.warnedRelevantFallback) {
         // eslint-disable-next-line no-console
         console.warn(
-          '[mastra-self-learning] overflowStrategy="relevant" requires semantic search ' +
-            '(Phase 4). Falling back to "recent" for now.',
+          '[mastra-self-learning] overflowStrategy="relevant" needs an embedder + ' +
+            'request context; falling back to "recent".',
         );
         this.warnedRelevantFallback = true;
       }
@@ -173,6 +200,27 @@ export class SkillRouter {
     }
     // 'recent' (default)
     return this.sortByRecent(skills);
+  }
+
+  /** Rank skills by cosine similarity of "name: description" to the context. */
+  private async sortByRelevance(
+    skills: SkillRecord[],
+    contextText: string,
+  ): Promise<SkillRecord[]> {
+    const texts = [
+      contextText,
+      ...skills.map((s) => `${s.name}: ${this.descriptionFor(s)}`),
+    ];
+    const vecs = await this.embed!(texts);
+    const ctxVec = vecs[0]!;
+    const scored = skills.map((s, i) => ({
+      s,
+      score: cosineSim(ctxVec, vecs[i + 1]!),
+    }));
+    scored.sort((a, b) =>
+      b.score !== a.score ? b.score - a.score : a.s.name < b.s.name ? -1 : 1,
+    );
+    return scored.map((x) => x.s);
   }
 
   private sortByRecent(skills: SkillRecord[]): SkillRecord[] {

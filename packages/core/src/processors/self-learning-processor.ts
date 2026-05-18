@@ -8,6 +8,7 @@ import {
   type MastraPostgresLike,
 } from '../skills/storage-extension.js';
 import { SkillSearch } from '../skills/search.js';
+import type { EmbedText } from '../skills/embedding.js';
 import { SkillRefiner, signalsActive } from '../skills/refiner.js';
 import {
   type AuxiliaryGenerate,
@@ -59,6 +60,11 @@ export interface SelfLearningProcessorOptions {
    * dashboards; precursor to Phase-6 OpenTelemetry. See {@link SelfLearningEvent}.
    */
   onEvent?: SelfLearningEventHandler;
+  /**
+   * Optional embedder for semantic dedup (v0.2.0; closes risk R7). Ignored
+   * when `storage` is an already-constructed extension (carries its own).
+   */
+  embed?: EmbedText;
   /**
    * Test-only: maximum time (ms) to wait for pending extractions during
    * `_waitForPendingExtractions()`. Default 30 s.
@@ -149,8 +155,8 @@ export function createSelfLearningProcessor(
   const storage =
     options.storage instanceof SkillStorageExtension
       ? options.storage
-      : new SkillStorageExtension(options.storage);
-  const search = new SkillSearch(storage);
+      : new SkillStorageExtension(options.storage, { embed: options.embed });
+  const search = new SkillSearch(storage, options.embed);
   const policy = ExtractionPolicySchema.parse(options.extraction ?? {});
   const extractor = new SkillExtractor(storage, search, policy, options.generate);
   const refiner = new SkillRefiner(

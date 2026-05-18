@@ -33,8 +33,9 @@ export interface TaskTrajectory {
 }
 
 /**
- * Threshold for FTS-based deduplication, tuned to Postgres `ts_rank_cd` units
- * (NOT cosine similarity — different scale). See `risks-and-unknowns.md` (R7).
+ * Degraded FTS dedup threshold (Postgres `ts_rank_cd` units) used ONLY when no
+ * embedder is configured. The primary path is semantic cosine vs
+ * `policy.deduplicationThreshold` (a real 0..1 gate). v0.2.0 / closes R7.
  */
 const FTS_DEDUP_RANK_THRESHOLD = 0.05;
 
@@ -96,19 +97,7 @@ export class SkillExtractor {
       };
     }
 
-    // 3. Deduplication (cheap FTS — run before generalizability so we don't
-    //    spend an LLM call on a task that already maps to an existing skill).
-    const dupe = await this.findDuplicate(trajectory);
-    if (dupe) {
-      return {
-        triggered: false,
-        reason: `duplicate of skill "${dupe.name}" (rank ${dupe.score.toFixed(3)})`,
-        skill: dupe.skill,
-      };
-    }
-
-    // 4. Generalizability check (expensive LLM call — runs only if dedup
-    //    didn't find a match).
+    // 3. Generalizability check (LLM gate before the heavier synthesis).
     if (this.policy.useGeneralizabilityCheck) {
       if (!this.generate) throw new AuxiliaryLLMNotConfiguredError();
       const isGeneralizable = await this.checkGeneralizability(trajectory);
@@ -117,7 +106,7 @@ export class SkillExtractor {
       }
     }
 
-    // 5–6. Synthesize + normalize + parse
+    // 4–5. Synthesize + normalize + parse.
     if (!this.generate) throw new AuxiliaryLLMNotConfiguredError();
     let synthesized: string;
     try {
@@ -126,6 +115,22 @@ export class SkillExtractor {
       return {
         triggered: false,
         reason: `synthesis failed: ${err instanceof Error ? err.message : String(err)}`,
+      };
+    }
+
+    // 6. Deduplication on the SYNTHESIZED content (closes R7). v0.1.0 deduped
+    //    on the raw trajectory, which lives in a different token/semantic
+    //    space than the abstracted skill body — so near-duplicates slipped
+    //    through. Comparing synthesized-skill ↔ existing-skill embeddings is
+    //    like-with-like and reliable. Costs one synthesis for an eventual
+    //    duplicate; correctness over the saved call (and the matched skill is
+    //    needed to route to refinement anyway).
+    const dupe = await this.findDuplicate(trajectory, synthesized);
+    if (dupe) {
+      return {
+        triggered: false,
+        reason: `duplicate of skill "${dupe.name}" (${dupe.matchType} ${dupe.score.toFixed(3)})`,
+        skill: dupe.skill,
       };
     }
 
@@ -199,24 +204,44 @@ export class SkillExtractor {
 
   private async findDuplicate(
     trajectory: TaskTrajectory,
-  ): Promise<{ skill: NonNullable<ExtractionResult['skill']>; score: number; name: string } | null> {
-    // FTS over the tool-call names (unique). The actual content of arguments is
-    // too noisy for FTS dedup; tool sequence is the signal that survives.
-    const uniqueNames = Array.from(new Set(trajectory.toolCalls.map((c) => c.name)));
-    const query = uniqueNames.slice(0, 12).join(' ');
-    if (!query.trim()) return null;
+    synthesized: string,
+  ): Promise<{
+    skill: NonNullable<ExtractionResult['skill']>;
+    score: number;
+    name: string;
+    matchType: 'fts' | 'semantic' | 'hybrid';
+  } | null> {
+    // Compare the SYNTHESIZED skill against existing skills — skill-content ↔
+    // skill-content, the same space embeddings live in (this is what makes
+    // semantic dedup reliable and closes R7). SkillSearch embeds the query;
+    // with no embedder it degrades to FTS automatically.
+    const { frontmatter, body } = parseSkillDocument(synthesized);
+    const query = `${frontmatter.name}\n${frontmatter.description}\n${body}`.trim();
+    if (!query) return null;
 
     try {
       const results = await this.search.search({
         query,
-        mode: 'fts',
+        mode: 'semantic', // SkillSearch degrades to FTS if no embedder
         limit: 1,
         agentId: trajectory.agentId ?? undefined,
       });
       if (results.length === 0) return null;
       const top = results[0]!;
-      if (top.score > FTS_DEDUP_RANK_THRESHOLD) {
-        return { skill: top.skill, score: top.score, name: top.skill.name };
+
+      // Semantic/hybrid scores are cosine 0..1 → use the real
+      // deduplicationThreshold. FTS (degraded) keeps the coarse rank gate.
+      const isSemantic = top.matchType === 'semantic' || top.matchType === 'hybrid';
+      const hit = isSemantic
+        ? top.score >= this.policy.deduplicationThreshold
+        : top.score > FTS_DEDUP_RANK_THRESHOLD;
+      if (hit) {
+        return {
+          skill: top.skill,
+          score: top.score,
+          name: top.skill.name,
+          matchType: top.matchType,
+        };
       }
       return null;
     } catch (err) {

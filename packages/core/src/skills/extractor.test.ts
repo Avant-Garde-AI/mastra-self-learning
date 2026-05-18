@@ -182,11 +182,12 @@ describe('SkillExtractor.evaluate — policy gates', () => {
       createdAt: 'x',
       updatedAt: 'x',
     };
+    // Dedup is post-synthesis (skill↔skill), so synthesis must succeed first.
     const ex = new SkillExtractor(
       mkStorage(),
       mkSearch([{ skill: existing, score: 0.5 }]),
       ExtractionPolicySchema.parse({ useGeneralizabilityCheck: false }),
-      vi.fn(),
+      vi.fn().mockResolvedValue(VALID_SKILL),
     );
     const result = await ex.evaluate(mkTraj());
     expect(result.triggered).toBe(false);

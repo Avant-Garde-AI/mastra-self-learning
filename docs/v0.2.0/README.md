@@ -16,6 +16,8 @@ Read in order:
    implementation-ready design for the kickoff item (semantic search; closes
    risk R7; unblocks Phases 2 & 3).
 
-Status: planning complete; v0.1.0 remains shippable and unchanged. Phase 1 is
-next — the only thing blocking code is the embedding-provider decision
-(`03-phase1-semantic-search.md` Task 1.0).
+Status: **Phase 1 SHIPPED** — R1 semantic search, R2 `relevant` overflow, R3
+semantic dedup (closes risk R7). Embedding seam = callback `EmbedText` +
+`openAIEmbedder` (`text-embedding-3-small`, 1536-d). 189/189 core tests green;
+harness UAT Tier-A 5/5 (incl. A5 semantic-dedup acceptance). Phases 2–6 per
+`02-phased-plan.md` remain; next is Phase 2 (gardening).

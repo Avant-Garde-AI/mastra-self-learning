@@ -108,12 +108,21 @@ export interface SkillSearchOptions {
   /** Filter skills with success rate below this threshold (0-1) */
   minSuccessRate?: number;
   agentId?: string;
+  /**
+   * Pre-computed query embedding for semantic/hybrid modes. The storage layer
+   * does not embed; the SkillSearch wrapper computes this from `query` via the
+   * injected embedder and passes it through.
+   */
+  queryEmbedding?: number[];
+  /** Hybrid blend weight on the semantic term (0..1). Default 0.7. */
+  semanticWeight?: number;
 }
 
 export interface SkillSearchResult {
   skill: SkillRecord;
   score: number;
-  matchType: 'fts' | 'semantic';
+  /** 'fts' = lexical rank (unbounded); 'semantic' = cosine sim 0..1; 'hybrid' = blended 0..1. */
+  matchType: 'fts' | 'semantic' | 'hybrid';
 }
 
 // ---------------------------------------------------------------------------

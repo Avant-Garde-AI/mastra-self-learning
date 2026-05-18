@@ -276,8 +276,13 @@ None known.
 `,
     );
 
+    // No embedder on the shared `storage` → SkillSearch degrades to FTS. Dedup
+    // runs on the synthesized content; run #2's near-identical SKILL.md FTS-
+    // matches the stored one. Both runs do generalizability + synthesis.
     const generate = vi
       .fn()
+      .mockResolvedValueOnce('YES')
+      .mockResolvedValueOnce(fixtureWithToolName)
       .mockResolvedValueOnce('YES')
       .mockResolvedValueOnce(fixtureWithToolName);
     const processor = createSelfLearningProcessor({
@@ -307,41 +312,61 @@ None known.
       turns: 4,
     });
     list = await storage.listSkills({ agentId: 'ops-agent' });
+    // FTS-degraded dedup on synthesized content still catches the duplicate.
     expect(list).toHaveLength(1);
-    // Generate called twice total: generalizability + synthesis from run #1
-    // only. Run #2 short-circuits at the dedup gate (before generalizability).
-    expect(generate).toHaveBeenCalledTimes(2);
+    // Dedup is post-synthesis: both runs do generalizability + synthesis.
+    expect(generate).toHaveBeenCalledTimes(4);
   });
 
-  it('does NOT dedup when synthesized skill omits the tool names (known FTS limitation)', async () => {
-    // Documented in risks-and-unknowns.md R7 — FTS dedup is coarser than
-    // semantic. When synthesis fully abstracts tool names away, FTS won't
-    // match them on the next trajectory.
+  it('semantic dedup catches a near-duplicate even when synthesis abstracts tool names (R7 CLOSED)', async () => {
+    // v0.1.0 risk R7: FTS dedup missed near-duplicates whose synthesized
+    // content abstracted the tool names away. v0.2.0 semantic dedup fixes it.
+    const { SkillStorageExtension } = await import(
+      '../src/skills/storage-extension.js'
+    );
+    const { hashEmbedder } = await import('../src/skills/embedding.js');
+    const embed = hashEmbedder(1536);
+    const semStore = new SkillStorageExtension(store as unknown as never, {
+      embed,
+      embeddingDimensions: 1536,
+    });
+    await semStore.ensureSchema();
+
     const generate = vi
       .fn()
       .mockResolvedValueOnce('YES')
       .mockResolvedValueOnce(synthesisFixture('cloud-run-deploy', 'Deploy a service'))
-      // 2nd run also gets a YES + synthesis; we'll observe whether it stores.
+      // Run #2 synthesizes a near-identical SKILL.md; dedup runs on the
+      // synthesized content and must route it to the existing skill.
       .mockResolvedValueOnce('YES')
-      .mockResolvedValueOnce(synthesisFixture('cloud-run-deploy-v2', 'Deploy a service v2'));
+      .mockResolvedValueOnce(synthesisFixture('cloud-run-deploy-2', 'Deploy a service'));
     const processor = createSelfLearningProcessor({
-      storage,
+      storage: semStore,
       generate,
+      embed,
       extraction: { cooldownMs: 0 },
       agentId: 'ops-agent',
     });
+
     await runScenario(processor, {
       toolCalls: Array.from({ length: 6 }, (_, i) => ({ name: `gcloud_run_describe`, input: { i } })),
       turns: 4,
     });
+    let list = await semStore.listSkills({ agentId: 'ops-agent' });
+    expect(list).toHaveLength(1);
+
+    // Near-identical trajectory + (would-be) near-identical synthesis.
     await runScenario(processor, {
       toolCalls: Array.from({ length: 6 }, (_, i) => ({ name: `gcloud_run_describe`, input: { i: i + 10 } })),
       turns: 4,
     });
-    const list = await storage.listSkills({ agentId: 'ops-agent' });
-    // Two distinct skills survive because dedup couldn't find a textual match
-    // for the tool name in the abstracted synthesized content.
-    expect(list).toHaveLength(2);
+    list = await semStore.listSkills({ agentId: 'ops-agent' });
+    // Semantic dedup (on synthesized content) routed run #2 to the existing
+    // skill — no near-duplicate stored. THIS is R7 closed.
+    expect(list).toHaveLength(1);
+    // Dedup is post-synthesis by design (skill↔skill comparison), so both
+    // runs do generalizability + synthesis: 4 aux calls total.
+    expect(generate).toHaveBeenCalledTimes(4);
   });
 
   it('respects cooldown between consecutive extractions', async () => {

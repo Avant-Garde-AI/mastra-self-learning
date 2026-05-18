@@ -111,6 +111,10 @@ export const SelfLearningConfigSchema = z.object({
   auxiliaryModel: z.string().default('anthropic/claude-sonnet-4-20250514'),
   /** Model ID for embedding (semantic skill search) */
   embeddingModel: z.string().optional(),
+  /** Embedding vector dimensions. Must match the embedder. Default 1536 (text-embedding-3-small). */
+  embeddingDimensions: z.number().int().positive().default(1536),
+  /** Hybrid search blend weight on the semantic component (0..1). Default 0.7. */
+  semanticWeight: z.number().min(0).max(1).default(0.7),
 
   extraction: ExtractionPolicySchema.default({}),
   router: SkillRouterConfigSchema.default({}),

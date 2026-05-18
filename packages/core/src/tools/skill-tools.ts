@@ -10,6 +10,7 @@ import {
 } from '../skills/storage-extension.js';
 import { SkillSearch } from '../skills/search.js';
 import { SkillRouter } from '../skills/router.js';
+import type { EmbedText } from '../skills/embedding.js';
 import { FactLayer } from '../memory/fact-layer.js';
 import { FactLayerConfigSchema } from '../config.js';
 import { parseSkillDocument } from '../skills/parser.js';
@@ -35,6 +36,11 @@ export interface SelfLearningToolsOptions {
   storage: MastraPostgresLike | SkillStorageExtension;
   /** Scope tools to a specific agent. Pass `null` for global-only. */
   agentId?: string | null;
+  /**
+   * Optional embedder for semantic skill_search (v0.2.0). Ignored when
+   * `storage` is an already-constructed extension (it carries its own).
+   */
+  embed?: EmbedText;
 }
 
 /**
@@ -66,12 +72,15 @@ export function createSelfLearningTools(options: SelfLearningToolsOptions) {
   const storage =
     options.storage instanceof SkillStorageExtension
       ? options.storage
-      : new SkillStorageExtension(options.storage);
-  const search = new SkillSearch(storage);
+      : new SkillStorageExtension(options.storage, { embed: options.embed });
+  const search = new SkillSearch(storage, options.embed);
   const router = new SkillRouter(
     storage,
     SkillRouterConfigSchema.parse({}),
     options.agentId,
+    undefined,
+    undefined,
+    options.embed,
   );
   const factLayer = new FactLayer(
     storage,
